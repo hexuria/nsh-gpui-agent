@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 const source = await readFile(new URL("page.js", import.meta.url), "utf8");
 function fakePlayer() {
   globalThis.location = { hash: "" };
@@ -11,6 +15,50 @@ function fakePlayer() {
   return { player };
 }
 function view(id, extra = {}) { return { _id: id, isConnected: true, parentElement: null, ...extra }; }
+
+test("caret and word defaults refuse an actual email input without selection offsets", (t) => {
+  const chrome = ["google-chrome", "chromium", "chrome"].find(
+    (name) => spawnSync(name, ["--version"]).status === 0,
+  );
+  if (!chrome) return t.skip("Chrome is required for real input selection behavior");
+  const profile = mkdtempSync(join(tmpdir(), "nsh-page-test-"));
+  const script = `${source}\n
+    try {
+      const field = document.createElement("input");
+      field.type = "email";
+      field.value = "one@example.com";
+      document.body.append(field);
+      field.focus();
+      if (field.selectionStart !== null) throw new Error("expected unavailable selection");
+      const player = { views: new Map() };
+      const cases = [
+        ["ArrowLeft", {}], ["ArrowRight", {}], ["Home", {}], ["End", {}],
+        ...["ArrowLeft", "ArrowRight", "Backspace", "Delete"].map(key => [key, { ctrl: true }]),
+        ...["ArrowLeft", "ArrowRight", "Backspace"].map(key => [key, { meta: true }]),
+      ];
+      for (const [key, modifiers] of cases) {
+        let error;
+        try { nshPageSteps.synth({ event: "key", phase: "down", key, ...modifiers }, player); }
+        catch (e) { error = e; }
+        if (!error?.message.includes("cannot be synthesized")) throw new Error("silently accepted " + key);
+      }
+      field.addEventListener("keydown", event => event.preventDefault());
+      nshPageSteps.synth({ event: "key", phase: "down", key: "Home" }, player);
+      if (field.value !== "one@example.com") throw new Error("email changed");
+      document.body.textContent = "ok";
+    } catch (error) { document.body.textContent = error.stack; }
+  `;
+  try {
+    const html = `<body><script>${script}</script></body>`;
+    const output = execFileSync(chrome, [
+      "--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+      `--user-data-dir=${profile}`, "--dump-dom", `data:text/html,${encodeURIComponent(html)}`,
+    ], { encoding: "utf8", timeout: 30000, stdio: ["ignore", "pipe", "pipe"] });
+    assert.ok(output.includes("<body>ok</body>"), output);
+  } finally {
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
 
 test("pairing consumes the fragment, survives reload and rejects malformed keys", () => {
   const key = "ab".repeat(16);

@@ -267,7 +267,7 @@ function synthesize(event) {
           return;
         }
         const selected = inputSelection(target);
-        if (!selected) return;
+        if (!selected) unsupported();
         const { start, end, backward: selectionBackward } = selected;
         const anchor = start === end ? start : selectionBackward ? end : start;
         const position = start === end ? start : selectionBackward ? start : end;
@@ -313,7 +313,7 @@ function synthesize(event) {
       if (input) {
         const value = target.value;
         const selected = inputSelection(target);
-        if (!selected) return;
+        if (!selected) unsupported();
         const { start, end, backward } = selected;
         const anchor = start === end ? start : backward ? end : start;
         let position = start === end ? start : backward ? start : end;
