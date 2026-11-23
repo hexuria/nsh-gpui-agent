@@ -28,7 +28,7 @@ and take screenshots, over a loopback connection the app opens only when it is t
 | Branch | `devin/stage1-macos-doors` (macOS doors on top of `gpui-agent`) |
 | What it is | An upstream release of `longbridge/nsh` plus a small set of doors, and nothing else |
 | Upstream release it sits on | `v0.6.1` (`2f51d8611`) |
-| Commit this repository is tested with | [`542291b7a`](https://github.com/hexuria/nsh/commit/542291b7a3870824432dd56d60db28c2709825d7) |
+| Commit this repository is tested with | [`cab9140b9`](https://github.com/hexuria/nsh/commit/cab9140b974d14ce2981761c0f9357c88813d09e) |
 | The doors | `SOCKET.md` at the root of that branch lists every one |
 
 A *door* is a small change that makes something in NSH public: an accessor, or a hook that calls out. A door holds
@@ -39,7 +39,7 @@ The branch is rebased onto each new upstream release, so depend on a commit, not
 
 ```toml
 [dependencies]
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "542291b7a3870824432dd56d60db28c2709825d7", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "cab9140b974d14ce2981761c0f9357c88813d09e", default-features = false, features = ["agent"] }
 ```
 
 ## Using it from an app
