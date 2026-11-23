@@ -171,6 +171,48 @@ fn find_native_view(ns: &NSView, id: NodeId, surface: &Rc<Surface>) -> Option<Ns
     None
 }
 
+fn pad_owner(surface: &Rc<Surface>, hit: &NSView) -> Option<NodeId> {
+    let mut pad = None;
+    walk(&surface.root(), &mut |view| {
+        if pad.is_none()
+            && view
+                .input()
+                .is_some_and(|input| text_input::pad_owns(&input, hit))
+        {
+            pad = Some(view.id());
+        }
+    });
+    pad.or_else(|| {
+        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+        NSApplication::sharedApplication(mtm)
+            .windows()
+            .iter()
+            .find_map(|window| {
+                let content = window.contentView()?;
+                pad_in_native(&content, hit, surface)
+            })
+    })
+}
+
+fn pad_in_native(ns: &NSView, hit: &NSView, surface: &Rc<Surface>) -> Option<NodeId> {
+    if let Some(view) = NshView::from_ns(ns)
+        && view
+            .input()
+            .is_some_and(|input| text_input::pad_owns(&input, hit))
+        && view
+            .surface()
+            .is_some_and(|owner| Rc::ptr_eq(&owner, surface))
+    {
+        return Some(view.id());
+    }
+    for subview in ns.subviews().iter() {
+        if let Some(id) = pad_in_native(&subview, hit, surface) {
+            return Some(id);
+        }
+    }
+    None
+}
+
 impl StrictNative for MacStrictNative {
     fn available(&self) -> bool {
         self.alive.load(Ordering::Acquire)
@@ -199,17 +241,7 @@ impl StrictNative for MacStrictNative {
             // A lifted input's pad is hosted outside its view's subtree:
             // the press it takes goes to the input's editor, so the hit is
             // the input's own rather than an occlusion.
-            let mut pad = None;
-            walk(&surface.root(), &mut |view| {
-                if pad.is_none()
-                    && view
-                        .input()
-                        .is_some_and(|input| text_input::pad_owns(&input, &hit))
-                {
-                    pad = Some(view.id());
-                }
-            });
-            if let Some(id) = pad {
+            if let Some(id) = pad_owner(surface, &hit) {
                 return Some(id);
             }
             let mut current = Some(hit);
