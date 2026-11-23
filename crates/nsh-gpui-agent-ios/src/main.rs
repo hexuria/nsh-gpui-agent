@@ -110,8 +110,12 @@ fn write_token(path: PathBuf, token: &str) -> Result<TokenFile, String> {
         .mode(0o600)
         .open(&path)
         .map_err(|e| format!("create private token file: {e}"))?;
-    file.write_all(token.as_bytes())
-        .map_err(|e| format!("write private token file: {e}"))?;
+    if let Err(e) = file.write_all(token.as_bytes()) {
+        // `create_new` made it ours: a failed write leaves an empty or
+        // partial file every relaunch would reject.
+        let _ = fs::remove_file(&path);
+        return Err(format!("write private token file: {e}"));
+    }
     Ok(TokenFile {
         path,
         token: token.to_owned(),
