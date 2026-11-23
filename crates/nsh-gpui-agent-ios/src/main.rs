@@ -23,7 +23,7 @@ const INFO: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>LSRequiresIPhoneOS</key><true/>
-<key>MinimumOSVersion</key><string>16.0</string>
+<key>MinimumOSVersion</key><string>15.0</string>
 <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
 </dict></plist>"#;
 
@@ -85,11 +85,18 @@ fn check_token(token: &str) -> Result<(), String> {
     Ok(())
 }
 
-struct TokenFile(PathBuf);
+struct TokenFile {
+    path: PathBuf,
+    token: String,
+}
 
 impl Drop for TokenFile {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        // Only remove the token this launch wrote: a replacement may
+        // already have put its own at the shared path.
+        if fs::read_to_string(&self.path).ok().as_deref() == Some(self.token.as_str()) {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -103,10 +110,12 @@ fn write_token(path: PathBuf, token: &str) -> Result<TokenFile, String> {
         .mode(0o600)
         .open(&path)
         .map_err(|e| format!("create private token file: {e}"))?;
-    let guard = TokenFile(path);
     file.write_all(token.as_bytes())
         .map_err(|e| format!("write private token file: {e}"))?;
-    Ok(guard)
+    Ok(TokenFile {
+        path,
+        token: token.to_owned(),
+    })
 }
 
 #[cfg(not(unix))]
@@ -186,9 +195,13 @@ fn run(options: Options) -> Result<ExitCode, String> {
     let flag = interrupted.clone();
     let pid = child_pid.clone();
     let cleanup = path.clone();
+    let own = token.clone();
     ctrlc::set_handler(move || {
         flag.store(true, Ordering::Release);
-        let _ = fs::remove_file(&cleanup);
+        // A replacement launch may own the shared path by now.
+        if fs::read_to_string(&cleanup).ok().as_deref() == Some(own.as_str()) {
+            let _ = fs::remove_file(&cleanup);
+        }
         interrupt_child(pid.load(Ordering::Acquire));
     })
     .map_err(|e| e.to_string())?;
