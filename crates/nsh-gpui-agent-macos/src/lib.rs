@@ -16,12 +16,13 @@ use std::sync::{
 
 use nsh_agent_actions::Agent;
 use nsh_gpui_agent::{NshAgentHost, PlatformKind, WorkerHandle};
-use nsh_platform_macos::surface::SurfaceHandle;
 #[cfg(feature = "gpui-agent-server")]
 use nsh_platform_macos::surface::Surface;
+use nsh_platform_macos::surface::SurfaceHandle;
 use nsh_testing::agent::{Model, OpenedSurface, SurfaceAttachment};
 
-static MODELS: LazyLock<Mutex<HashMap<u64, Weak<Model>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static MODELS: LazyLock<Mutex<HashMap<u64, Weak<Model>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[doc(hidden)]
 pub use crate::strict::MacStrictNative;

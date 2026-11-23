@@ -791,7 +791,11 @@ fn place(view: &NshView, window: &NSWindow, prefix: &str) -> Place {
         Some(test_id) => format!("{prefix}{test_id}"),
         None => format!("{prefix}n{}", view.id()),
     };
-    let role = if text_field { "textfield" } else { role_name(spec.role) };
+    let role = if text_field {
+        "textfield"
+    } else {
+        role_name(spec.role)
+    };
     let mut node = UiNode::new(id, role, spec.label.clone().unwrap_or_default());
     node.enabled = !spec.disabled;
     node.focused = text_input && focused_in(view, window);
@@ -1193,7 +1197,6 @@ fn describe(view: &NshView) -> String {
     }
 }
 
-
 /// `stroke` as `synth::key` names it: modifiers, then the key.
 fn keystroke_name(stroke: &nsh_core::keymap::Keystroke) -> String {
     use nsh_core::keymap::Key;
@@ -1242,7 +1245,10 @@ fn placed(rect: NSRect) -> Span {
     )
 }
 
-fn clip_span(rect: Span, ancestors: impl IntoIterator<Item = (Span, (f32, f32), bool)>) -> Option<Span> {
+fn clip_span(
+    rect: Span,
+    ancestors: impl IntoIterator<Item = (Span, (f32, f32), bool)>,
+) -> Option<Span> {
     let (mut x0, mut y0, mut x1, mut y1) = rect;
     for (frame, (ox, oy), clips) in ancestors {
         if clips {
@@ -2056,7 +2062,9 @@ fn catalog(surface: &Surface) -> Vec<Binding> {
         });
     }
     out.reverse();
-    let app = objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::new().expect("the agent runs on the main thread"));
+    let app = objc2_app_kit::NSApplication::sharedApplication(
+        MainThreadMarker::new().expect("the agent runs on the main thread"),
+    );
     if let Some(menu) = app.mainMenu() {
         menu_bindings(&menu, "menu.", &mut Vec::new(), &mut out);
     }
@@ -2197,7 +2205,9 @@ fn keybinding(surface: &Rc<Surface>, request: KeybindingRequest<'_>) -> Result<(
         binding: by_chord.map_or(request.binding, |info| &info.id),
         ..request
     };
-    let app = objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::new().expect("the agent runs on the main thread"));
+    let app = objc2_app_kit::NSApplication::sharedApplication(
+        MainThreadMarker::new().expect("the agent runs on the main thread"),
+    );
     let focused = app.isActive() && window.isKeyWindow();
     let info = authorize_keybinding(&infos, request, focused)?;
     let Some(binding) = catalog.iter().find(|b| b.info.id == info.id) else {

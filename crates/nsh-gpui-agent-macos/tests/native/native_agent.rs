@@ -10,9 +10,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use nsh_agent_actions::{Agent as StrictAgent, SemanticScene, StrictNative};
 use nsh_base::input;
 use nsh_core::{NodeId, ROOT_ID, element::desktop::window, prelude::*};
 use nsh_dev::protocol::{StepOutcome, TestStep};
+use nsh_gpui_agent_macos::MacStrictNative;
 use nsh_platform_macos::{
     self as platform,
     objc2::{MainThreadMarker, MainThreadOnly, Message, rc::Retained},
@@ -22,8 +24,6 @@ use nsh_platform_macos::{
     },
     objc2_foundation::{NSPoint, NSRect, NSSize},
 };
-use nsh_agent_actions::{Agent as StrictAgent, SemanticScene, StrictNative};
-use nsh_gpui_agent_macos::MacStrictNative;
 use nsh_testing::agent::{Agent as TestAgent, Model, Scene};
 
 use super::agent_support::{pump, until, worker};
@@ -236,7 +236,11 @@ fn secondary_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
         .expect("secondary window")
 }
 
-fn application_focus(mtm: MainThreadMarker, native: &mut Option<Box<dyn StrictNative>>, main: &NSWindow) {
+fn application_focus(
+    mtm: MainThreadMarker,
+    native: &mut Option<Box<dyn StrictNative>>,
+    main: &NSWindow,
+) {
     let app = NSApplication::sharedApplication(mtm);
     let secondary = secondary_window(mtm);
     main.makeKeyAndOrderFront(None);
@@ -405,7 +409,8 @@ pub(super) fn run() {
         },
     );
     let key = surface.surface_handle().key();
-    let model = nsh_gpui_agent_macos::surface_model(key).expect("the surface hook attached a model");
+    let model =
+        nsh_gpui_agent_macos::surface_model(key).expect("the surface hook attached a model");
     let native = Box::new(MacStrictNative::new(key, Arc::new(AtomicBool::new(true))))
         as Box<dyn StrictNative>;
     let mut native = Some(native);

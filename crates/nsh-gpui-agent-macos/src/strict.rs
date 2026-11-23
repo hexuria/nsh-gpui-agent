@@ -17,7 +17,10 @@ use nsh_core::{
     geometry::{Bounds, Point, Points, Size},
 };
 use nsh_platform_macos::{
-    agent::MacNative, input, surface::Surface, synth, text_input,
+    agent::MacNative,
+    input,
+    surface::Surface,
+    synth, text_input,
     view::{NshView, superview},
 };
 use nsh_testing::agent::{Key, Native, SystemName};
@@ -75,8 +78,9 @@ impl MacStrictNative {
             let window = match which {
                 Which::Main => surface.root().ns().window(),
                 Which::Target(ROOT_ID) => surface.root().ns().window(),
-                Which::Target(id) => find_view(&surface.root(), id)
-                    .and_then(|view| view.ns().window()),
+                Which::Target(id) => {
+                    find_view(&surface.root(), id).and_then(|view| view.ns().window())
+                }
                 Which::Key => {
                     let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
                     NSApplication::sharedApplication(mtm)
