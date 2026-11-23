@@ -27,7 +27,7 @@ and take screenshots, over a loopback connection the app opens only when it is t
 | Branch | `gpui-agent` |
 | What it is | An upstream release of `longbridge/nsh` plus a small set of doors, and nothing else |
 | Upstream release it sits on | `v0.6.1` (`2f51d8611`) |
-| Commit this repository is tested with | [`8b7020e1d`](https://github.com/hexuria/nsh/commit/8b7020e1d838f10ba41c3686be5723f7e2182746) |
+| Commit this repository is tested with | [`2cce2a8d0`](https://github.com/hexuria/nsh/commit/2cce2a8d030495e4b20346a58afe23349f6cd6bf) |
 | The doors | `SOCKET.md` at the root of that branch lists every one |
 
 A *door* is a small change that makes something in NSH public: an accessor, or a hook that calls out. A door holds
@@ -38,7 +38,7 @@ The branch is rebased onto each new upstream release, so depend on a commit, not
 
 ```toml
 [dependencies]
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "8b7020e1d838f10ba41c3686be5723f7e2182746", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "2cce2a8d030495e4b20346a58afe23349f6cd6bf", default-features = false, features = ["agent"] }
 ```
 
 ## Using it from an app
