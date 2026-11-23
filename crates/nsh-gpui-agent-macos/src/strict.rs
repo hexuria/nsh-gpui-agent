@@ -78,14 +78,14 @@ impl MacStrictNative {
             let window = match which {
                 Which::Main => surface.root().ns().window(),
                 Which::Target(ROOT_ID) => surface.root().ns().window(),
-                Which::Target(id) => {
-                    find_view(&surface.root(), id).and_then(|view| view.ns().window())
-                }
+                Which::Target(id) => target_view(&surface, id).and_then(|view| view.ns().window()),
                 Which::Key => {
                     let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-                    NSApplication::sharedApplication(mtm)
-                        .keyWindow()
-                        .or_else(|| surface.root().ns().window())
+                    let app = NSApplication::sharedApplication(mtm);
+                    match app.keyWindow() {
+                        Some(window) if window_belongs(&window, &surface) => Some(window),
+                        _ => surface.root().ns().window(),
+                    }
                 }
             };
             let Some(window) = window else {
@@ -117,6 +117,54 @@ fn find_view(root: &NshView, id: NodeId) -> Option<NshView> {
     }
     for child in root.child_views() {
         if let Some(view) = find_view(&child, id) {
+            return Some(view);
+        }
+    }
+    None
+}
+
+fn window_belongs(window: &NSWindow, surface: &Rc<Surface>) -> bool {
+    window
+        .contentView()
+        .is_some_and(|content| native_belongs(&content, surface))
+}
+
+fn native_belongs(ns: &NSView, surface: &Rc<Surface>) -> bool {
+    if NshView::from_ns(ns)
+        .and_then(|view| view.surface())
+        .is_some_and(|owner| Rc::ptr_eq(&owner, surface))
+    {
+        return true;
+    }
+    ns.subviews()
+        .iter()
+        .any(|subview| native_belongs(&subview, surface))
+}
+
+fn target_view(surface: &Rc<Surface>, id: NodeId) -> Option<NshView> {
+    find_view(&surface.root(), id).or_else(|| {
+        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+        NSApplication::sharedApplication(mtm)
+            .windows()
+            .iter()
+            .find_map(|window| {
+                let content = window.contentView()?;
+                find_native_view(&content, id, surface)
+            })
+    })
+}
+
+fn find_native_view(ns: &NSView, id: NodeId, surface: &Rc<Surface>) -> Option<NshView> {
+    if let Some(view) = NshView::from_ns(ns)
+        && view.id() == id
+        && view
+            .surface()
+            .is_some_and(|owner| Rc::ptr_eq(&owner, surface))
+    {
+        return Some(view);
+    }
+    for subview in ns.subviews().iter() {
+        if let Some(view) = find_native_view(&subview, id, surface) {
             return Some(view);
         }
     }
@@ -180,7 +228,7 @@ impl StrictNative for MacStrictNative {
 
     fn focus_node(&self, id: NodeId) -> Result<(), String> {
         self.on_main(move |surface, _| {
-            let view = find_view(&surface.root(), id);
+            let view = target_view(surface, id);
             view.is_some_and(|view| {
                 let Some(window) = view.ns().window() else {
                     return false;
@@ -295,7 +343,7 @@ impl Native for MacStrictNative {
             if let Some(event) = event {
                 let target = self.target();
                 let root = (target != ROOT_ID)
-                    .then(|| find_view(&surface.root(), target))
+                    .then(|| target_view(surface, target))
                     .flatten();
                 // The window stays the input's, as after a real move: what
                 // the hover changes is picked again where the pointer is,

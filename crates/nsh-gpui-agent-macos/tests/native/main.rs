@@ -2,8 +2,8 @@
 //!
 //! Run the strict native checks with:
 //! `GPUI_AGENT=0 NSH_NATIVE_AGENT_CHECK_ONLY=1 cargo test -p nsh-gpui-agent-macos --features dev-agent --test native -- --ignored`
-//! Run the legacy listener checks with:
-//! `NSH_AGENT_LISTENER_CHECK_ONLY=1 cargo test -p nsh-gpui-agent-macos --features dev-agent,gpui-agent-server --test native -- --ignored`
+//! Run the shared adapter listener checks with:
+//! `NSH_AGENT_LISTENER_CHECK_ONLY=1 cargo test -p nsh-gpui-agent-macos --features dev-agent --test native -- --ignored`
 
 #[cfg(all(target_os = "macos", not(feature = "gpui-agent-server")))]
 mod agent_listener;

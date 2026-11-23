@@ -1,8 +1,8 @@
 //! Real shared GPUI-agent listener checks in a desktop AppKit process.
-//! AppView construction starts the production Surface listener; protocol calls
+//! Surface-hook registration starts the shared adapter listener; protocol calls
 //! run off-thread while the main thread dispatches native input and mount batches.
 //!
-//! NSH_AGENT_LISTENER_CHECK_ONLY=1 cargo test -p nsh-platform-macos --features dev-agent --test native -- --ignored
+//! NSH_AGENT_LISTENER_CHECK_ONLY=1 cargo test -p nsh-gpui-agent-macos --features dev-agent --test native -- --ignored
 //! Requires a debug build with dev-agent and without gpui-agent-server.
 
 use std::{
