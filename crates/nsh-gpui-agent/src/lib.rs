@@ -914,9 +914,21 @@ fn serve_worker(
                 let live = live.clone();
                 let limits = limits.clone();
                 std::thread::spawn(move || {
+                    // The slot frees on unwind too: a panicking handler must
+                    // not pin the connection or its slot forever.
+                    struct Guard {
+                        live: Arc<Mutex<HashMap<u64, TcpStream>>>,
+                        inflight: Arc<std::sync::atomic::AtomicUsize>,
+                        connection: u64,
+                    }
+                    impl Drop for Guard {
+                        fn drop(&mut self) {
+                            self.live.lock().expect("live streams").remove(&self.connection);
+                            self.inflight.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    }
+                    let _guard = Guard { live, inflight, connection };
                     serve_worker_stream(stream, host, &token, &shutdown, &limits);
-                    live.lock().expect("live streams").remove(&connection);
-                    inflight.fetch_sub(1, Ordering::SeqCst);
                 });
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
