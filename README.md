@@ -52,8 +52,18 @@ builds NSH from its own checkout must point this repository's NSH at that same c
 nsh-core    = { path = "../nsh/crates/nsh-core" }
 nsh-testing = { path = "../nsh/crates/nsh-testing" }
 nsh-dev     = { path = "../nsh/crates/nsh-dev" }
-# nsh-core, nsh-dev and nsh-testing are the nsh-* crates this repository depends on
+nsh-base    = { path = "../nsh/crates/nsh-base" }
+# plus every other nsh-* crate this repository's dependency graph resolves from
+# the git source — check `cargo tree -i nsh-testing` (and the other nsh-* crates)
+# has exactly one instance each; a second copy silently splits global state
+# (the surface hook never fires).
 ```
+
+The same patch is needed in every Cargo workspace that compiles a host with the
+agent: generated workspaces (for example an app's `nsh/.nsh/rust/Cargo.toml`)
+are separate workspaces, so the app's own patch does not reach them. Add the
+same `[patch."https://github.com/hexuria/nsh"]` block there after each build
+regenerates the manifest.
 
 The app's NSH must contain everything branch `gpui-agent` has. Our own app line, `hexuria/nsh` branch `buwiz-next`,
 is that branch plus the app's other changes.
