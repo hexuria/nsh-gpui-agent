@@ -7,6 +7,8 @@ and take screenshots, over a loopback connection the app opens only when it is t
 > **Status: moving.** The adapter and the agent actions are here and their headless tests pass against the commit
 > below. Web has been exercised on Linux and the iOS Simulator attachment runs from this repository; until the
 > platforms table says otherwise, another platform does not work from here. The plan is in
+> below. macOS's native checks pass; its end-to-end gallery replay has not run yet. Until the platforms table says
+> otherwise, a platform does not work from here. The plan is in
 > [`hexuria/nsh`, branch `feat/nsh-agent-socket`](https://github.com/hexuria/nsh/tree/feat/nsh-agent-socket/handover/agent-socket).
 
 ## What is here
@@ -18,15 +20,17 @@ and take screenshots, over a loopback connection the app opens only when it is t
 | `crates/nsh-agent-web` | An NSH CLI wrapper for owned-Chromium or user-opened Web tabs, with page-side hooks and synthetic tab input. |
 | `crates/nsh-gpui-agent-ios-host` | A development host that registers the iOS surface hook before starting NSH, supplied through `NSH_RUNTIME`. |
 | `crates/nsh-gpui-agent-ios` | A Simulator launcher wrapping `nsh_cli::main()`, with a private one-use token handoff. |
+| `crates/nsh-gpui-agent-macos` | The macOS surface hook, strict native driver, in-process server and opt-in `nsh-macos-host` development binary. |
 
 ## Which NSH to use
 
-**Use `https://github.com/hexuria/nsh`, branch `gpui-agent`.** Upstream NSH on its own does not work.
+**Use the pinned commit below from `https://github.com/hexuria/nsh`.** The macOS doors are on
+`devin/stage1-macos-doors` until merged into `gpui-agent`; upstream NSH on its own does not work.
 
 | | |
 |---|---|
 | Repository | `https://github.com/hexuria/nsh` |
-| Branch | `gpui-agent` |
+| Branch | `devin/stage1-macos-doors` (macOS doors on top of `gpui-agent`) |
 | What it is | An upstream release of `longbridge/nsh` plus a small set of doors, and nothing else |
 | Upstream release it sits on | `v0.6.1` (`2f51d8611`) |
 | Commit this repository is tested with | [`56add34a0`](https://github.com/hexuria/nsh/commit/56add34a019022de6433dcf6fa62b345d33a3342) |
@@ -57,10 +61,44 @@ nsh-dev     = { path = "../nsh/crates/nsh-dev" }
 # Include this when linking the Web CLI wrapper:
 nsh-cli     = { path = "../nsh/crates/nsh-cli" }
 nsh-platform-ios = { path = "../nsh/crates/nsh-platform-ios" } # when enabling ios
+nsh-core           = { path = "../nsh/crates/nsh-core" }
+nsh-testing        = { path = "../nsh/crates/nsh-testing" }
+nsh-dev            = { path = "../nsh/crates/nsh-dev" }
+nsh-base           = { path = "../nsh/crates/nsh-base" }
+nsh-platform-macos = { path = "../nsh/crates/nsh-platform-macos" }
+nsh-macos-host     = { path = "../nsh/crates/nsh-macos-host" }
 ```
 
 The app's NSH must contain everything branch `gpui-agent` has. Our own app line, `hexuria/nsh` branch `buwiz-next`,
 is that branch plus the app's other changes.
+
+## macOS development host
+
+Build this repository's host, not the one in the NSH checkout, and put it where `nsh run` looks for a runtime.
+Use an `nsh` CLI built from the same doors commit:
+
+```sh
+cargo build -p nsh-gpui-agent-macos --bin nsh-macos-host
+mkdir -p target/nsh-runtime/macos
+ln -sf "$PWD/target/debug/nsh-macos-host" "$PWD/target/nsh-runtime/macos/nsh-macos-host"
+export NSH_RUNTIME="$PWD/target/nsh-runtime"
+export GPUI_AGENT_TOKEN="$(openssl rand -hex 32)"
+export GPUI_AGENT_ADDR=127.0.0.1:17421
+GPUI_AGENT=1 nsh run ../nsh/examples/gallery --target macos
+```
+
+Use the same address and token with `gpui-agent` in another terminal. An app with its own Rust host takes precedence
+over `NSH_RUNTIME`: link `nsh-gpui-agent-macos` into that host and call `install()` before opening surfaces. The hook
+retains its worker until the surface closes; without the opt-in environment no server starts. Feature `gpui-agent`
+exposes the in-process tree/action API (`AppViewAgentExt`); feature `gpui-agent-server` also compiles the legacy
+in-process listener. `dev-agent` is on by default here and starts the strict adapter only in debug builds; when
+`gpui-agent-server` is also enabled, the private server owns the listener and no strict worker starts, matching
+buwiz's feature split. A release embedding that wants only the in-process API or server should disable default
+features so the development adapter is not linked.
+
+One build-time difference remains: because the doors are dev-gated, `nsh-platform-macos` is pinned with its `dev`
+feature even when a consumer selects only the in-process server. That compiles upstream development support into such
+a build. Input provenance, settle behavior, file drops, surface ownership and window lookup match buwiz.
 
 ## gpui-agent version
 
@@ -142,7 +180,7 @@ Filled in from real runs on each platform's own machine. Headless tests on Linux
 
 | Platform | Status | Tested on |
 |---|---|---|
-| macOS | not run yet | |
+| macOS | Native strict-driver and shared-listener checks pass in a desktop session; gallery replay not run yet | arm64 Mac, macOS 26.6.2 |
 | Linux | not run yet | |
 | Windows | not run yet | |
 | Android | not run yet | |
