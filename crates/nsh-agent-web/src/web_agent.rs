@@ -157,13 +157,15 @@ fn open(page: &Page, server: &DevServer, key: String) -> Result<(), String> {
         "Page.addScriptToEvaluateOnNewDocument",
         json!({
             "source": format!(
-                "if (location.host === {}) \
+                "if (location.origin === {}) \
                  Object.defineProperty(globalThis, '__nshAgentKey', \
                  {{ value: {}, configurable: true }});",
-                // `location.host` omits the scheme's default port.
+                // `location.origin` is scheme + host and omits the
+                // scheme's default port: matching it keeps the key off
+                // pages another scheme on the same host serves.
                 serde_json::Value::from(match server.local_addr().port() {
-                    80 => "127.0.0.1".to_owned(),
-                    port => format!("127.0.0.1:{port}"),
+                    80 => "http://127.0.0.1".to_owned(),
+                    port => format!("http://127.0.0.1:{port}"),
                 }),
                 serde_json::Value::from(key)
             ),
