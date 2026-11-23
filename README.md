@@ -85,7 +85,7 @@ in-process listener. `dev-agent` is on by default here and starts the strict ada
 buwiz's feature split. A release embedding that wants only the in-process API or server should disable default
 features so the development adapter is not linked.
 
-Three differences are imposed by the current pure doors and are not behavior-preserving yet: synthesized input cannot
+These differences are imposed by the current pure doors and are not behavior-preserving yet: synthesized input cannot
 be stamped or wrapped for input provenance inside upstream's synth path; the legacy server's settle wait cannot read
 the surface's pending/frame bit and treats it as quiet; and `dropFiles` delegates to upstream rather than preserving
 the pointer's window as buwiz did. Reading the public `NshView::surface` facade can also run upstream's keyboard
