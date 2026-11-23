@@ -16,7 +16,7 @@ use std::sync::{
 
 use nsh_agent_actions::Agent;
 use nsh_gpui_agent::{NshAgentHost, PlatformKind, WorkerHandle};
-#[cfg(feature = "gpui-agent-server")]
+#[cfg(feature = "gpui-agent")]
 use nsh_platform_macos::surface::Surface;
 use nsh_platform_macos::surface::SurfaceHandle;
 use nsh_testing::agent::{Model, OpenedSurface, SurfaceAttachment};
@@ -28,9 +28,12 @@ static MODELS: LazyLock<Mutex<HashMap<u64, Weak<Model>>>> =
 pub use crate::strict::MacStrictNative;
 
 pub mod provenance;
+
+pub use provenance::{Input, on_input};
 mod strict;
 
 #[cfg(feature = "gpui-agent")]
+#[cfg_attr(not(feature = "gpui-agent-server"), allow(dead_code, unused_imports))]
 mod gpui_agent;
 
 #[cfg(feature = "gpui-agent")]
@@ -59,10 +62,9 @@ fn opened(opened: &OpenedSurface<'_>) -> Option<SurfaceAttachment> {
     }
 
     let model = Arc::new(Model::default());
-    MODELS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(key, Arc::downgrade(&model));
+    let mut models = MODELS.lock().unwrap_or_else(|e| e.into_inner());
+    models.retain(|_, model| model.strong_count() > 0);
+    models.insert(key, Arc::downgrade(&model));
     let alive = Arc::new(AtomicBool::new(true));
     let native = MacStrictNative::new(key, alive.clone());
     let agent = Arc::new(Agent::requiring_native_hit_test(

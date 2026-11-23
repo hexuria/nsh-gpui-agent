@@ -5,7 +5,7 @@
 //! [`Input::Agent`] while an automation acts. What it does with them is
 //! its own business; nsh only says where input came from.
 //!
-//! Input made in process ([`crate::synth`]) is told apart from the
+//! Input made in process is told apart from the
 //! system's by a mark on the event, so a synthesized press never reads as
 //! the person's. Nor does an event another process posted: the system says
 //! which process that was, and hardware is no process ([`source_of`]). Hover
@@ -32,12 +32,12 @@ pub enum Input {
     Agent,
     /// The person pressed or typed in a surface.
     Person {
-        /// Its key ([`crate::AppView::surface_key`]).
+        /// Its surface key.
         surface: u64,
     },
 }
 
-/// The `eventNumber` of the mouse events [`crate::synth`] makes. A real
+/// The `eventNumber` of the mouse events synthesized input makes. A real
 /// event that happens to carry it counts as synthesized: the safe way round.
 pub(crate) const SYNTH_EVENT: isize = 0x6e_73_68;
 
@@ -46,12 +46,12 @@ type Listener = Rc<dyn Fn(Input)>;
 thread_local! {
     static LISTENER: RefCell<Option<Listener>> = const { RefCell::new(None) };
     static MONITOR: RefCell<Option<Retained<AnyObject>>> = const { RefCell::new(None) };
-    /// A key event [`crate::synth`] is handing over now (key events carry
+    /// A key event synthesized input is handing over now (key events carry
     /// no number to mark).
     static SYNTH_KEY: Cell<bool> = const { Cell::new(false) };
     /// Whether synthesized input is the developer's, not an agent's.
     static SYNTH_IS_PERSON: Cell<bool> = const { Cell::new(false) };
-    /// The in-process actions running ([`crate::AppView::act`]): theirs
+    /// The in-process actions running: theirs
     /// are an agent's whatever the test channel says.
     static AGENT_RUNS: Cell<u32> = const { Cell::new(0) };
 }
