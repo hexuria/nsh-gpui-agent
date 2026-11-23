@@ -1,0 +1,52 @@
+[package]
+name = "nsh-gpui-agent-macos"
+description = "macOS surface hook, strict native driver, private server and opt-in development host for NSH's gpui-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["dev-agent"]
+dev-agent = []
+gpui-agent = []
+gpui-agent-server = ["gpui-agent"]
+
+[[bin]]
+name = "nsh-macos-host"
+path = "src/main.rs"
+
+[[test]]
+name = "native"
+path = "tests/native/main.rs"
+harness = false
+
+[target.'cfg(target_os = "macos")'.dependencies]
+log.workspace = true
+serde_json.workspace = true
+gpui-agent.workspace = true
+nsh-agent-actions.workspace = true
+nsh-gpui-agent = { path = "../nsh-gpui-agent", features = ["dev-agent"] }
+nsh-core.workspace = true
+nsh-testing = { workspace = true, features = ["agent"] }
+nsh-platform-macos.workspace = true
+nsh-macos-host.workspace = true
+nsh-base.workspace = true
+block2.workspace = true
+dispatch2.workspace = true
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-core-foundation.workspace = true
+objc2-core-graphics.workspace = true
+objc2-foundation.workspace = true
+objc2-quartz-core.workspace = true
+libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+nsh-dev.workspace = true
+getrandom.workspace = true

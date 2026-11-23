@@ -1,0 +1,2874 @@
+//! The gpui-agent host (feature `gpui-agent`): serves the gpui-agent
+//! protocol (NDJSON over TCP) from inside a running app, so the
+//! `gpui-agent` CLI, its MCP server and any other client drive the app
+//! with the input a user gives.
+//!
+//! **Trust.** Feature `gpui-agent` compiles in the tree and the actions.
+//! Feature `gpui-agent-server` adds the listener: a shipped app leaves it
+//! off and opens no port, whatever its environment says. With it,
+//! [`install`] starts the server for a window when the app runs with
+//! `GPUI_AGENT=1`, and
+//! `gpui_agent::security::from_env` sets the terms: requests carry the
+//! token (`GPUI_AGENT_TOKEN`, an HMAC challenge per connection; only
+//! `GPUI_AGENT_INSECURE_NO_TOKEN` waives it; `GPUI_AGENT_TOKEN_FILE` names a
+//! file holding it instead, so it stays out of the environment, which any
+//! process of this user can read: [`agent_config`]), the server listens on
+//! loopback (`GPUI_AGENT_REMOTE` with a token opens another address),
+//! and a release build serves only with `GPUI_AGENT_ALLOW_RELEASE`. The
+//! server runs on a thread of its own and posts each request on an
+//! [`AgentMailbox`]; a timer on the main queue drains it about once a
+//! display frame, so the host touches views only on the main thread.
+//!
+//! **Attribution.** The channel's input reads as the person's, as a
+//! developer's. `GPUI_AGENT_ACTOR=agent` (any value but `person`) makes
+//! it an agent's: each action tells the app
+//! ([`crate::provenance::Input::Agent`]) and its events never read as the
+//! person's. Without the server there is no such setting, and input made
+//! here is always an agent's.
+//!
+//! **In the process.** [`act`] is the same action for a caller inside the
+//! app ([`crate::AppView::act`]), with or without the server: it steps as
+//! a request does, is always an agent's, whatever the channel says, and
+//! never activates the app, which the person may be using for something
+//! else.
+//!
+//! **Ops.** `hello`; `snapshot` (with `fingerprints`, `since` a
+//! revision, `format: "compact"`: what shows and can be operated, one
+//! line a node) and `revision`; `assert` and `wait_until`; `click`, `type`,
+//! `set_value` and `key` on a target; `keybindings` and `keybinding`;
+//! `wait`; `screenshot` (the window, drawn in process: [`synth::shot`]);
+//! `shutdown`; and the invokes `press`, `hover`, `drag` and `scroll` (on
+//! a target or at a point) and `viewport` (the window's content size, or
+//! a preset).
+//!
+//! **The tree** is what VoiceOver gets: each view's [`access::Spec`]
+//! (role, label, value, states) becomes a [`UiNode`] with the `testID` or
+//! `n<node>` id; a hidden view takes its subtree out, a grouped element
+//! its children, and a plain layout box passes its children up. `visible`
+//! says a node shows or would once scrolled to, and `in_viewport` that it
+//! shows now. A target is a node of exactly this tree, by id, else by
+//! name; the revision is a hash of the tree. A masked input's value is a
+//! bullet per character, with a `masked` state: its text reaches no
+//! snapshot (full or compact), revision, fingerprint, reply or error.
+//! `type` and `set_value` still type into it.
+//!
+//! **Embedded surfaces.** An app that hosts another nsh surface in a view
+//! (an [`crate::AppView`] in a native component: a mini app in a card)
+//! has its tree in the snapshot too: a `group` node `s<key>` (the
+//! embedded surface's key, which it keeps while it lives) where the
+//! hosting view's node would hold its children, and under it the embedded
+//! app's nodes, their ids prefixed `s<key>:` (`s7:n12`, `s7:save`; one
+//! nested deeper `s7:s9:n3`). Bounds are the window's; an embedded node
+//! is shown where its host shows it too. Actions find these nodes as any
+//! other and their input goes through the window to the embedded view.
+//!
+//! **Actionability.** An action acts once its target is actionable: shown
+//! (an area, not hidden, left of it by every clipping ancestor and the
+//! window; a target a scroll view has out of sight is scrolled into view),
+//! enabled, and the view a press at the middle of its shown part reaches,
+//! as the window delivers it (AppKit's hit test, then nsh's picking over
+//! the root). It retries for about a second, then fails with
+//! `target_gone`, `not_visible`, `offscreen`, `disabled` or
+//! `occluded_by`. Input is posted to the app as the system posts it
+//! ([`crate::synth`], as `nsh test`'s agent does), so press handlers, text
+//! input and the keymap see real events.
+//!
+//! **Settle.** An action replies once the app is quiet: no batches coming
+//! or waiting, no native animation, no frame JS asked for, for about
+//! 100 ms in a row, 2 s at most. The next snapshot sees what it did.
+//! Actions are jobs stepped once per drain, in order, so the main thread
+//! runs freely between steps.
+//!
+//! **Key bindings** are the app's keymap's (focused scope) and its menus'
+//! key equivalents (global scope); one that closes, quits or deletes
+//! fires only with `confirm`.
+
+use std::{
+    collections::VecDeque,
+    hash::{Hash, Hasher},
+    rc::Rc,
+    time::{Duration, Instant},
+};
+
+use gpui_agent::{
+    AgentMailbox, DispatchResult,
+    keybinding::{
+        KeybindingInfo, KeybindingRequest, authorize_keybinding, binding_is_dangerous,
+        keybinding_list_json,
+    },
+    mailbox::MailboxRequest,
+    protocol::{
+        AssertSpec, DeliveryMode, HelloInfo, KeybindingScope, Op, PROTOCOL_VERSION, PlatformKind,
+        Request, Response, SnapshotFormat,
+    },
+    tree::{Bounds as TreeBounds, UiNode, UiTree},
+};
+use nsh_core::{
+    EventKind, ViewKind,
+    geometry::{Bounds, Point, Points, Size},
+};
+use objc2::{MainThreadMarker, Message};
+use objc2_app_kit::{NSEventModifierFlags, NSEventType, NSView, NSWindow};
+use objc2_foundation::NSRect;
+
+use nsh_platform_macos::{
+    access,
+    access::{Ax, Value},
+    surface::Surface,
+    synth,
+    view::NshView,
+};
+
+/// How often the main queue drains the request mailbox and steps the
+/// action in flight: about a display frame.
+const DRAIN: Duration = Duration::from_millis(15);
+/// How long a TCP thread waits for its request to be answered.
+#[cfg(feature = "gpui-agent-server")]
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How many drains an action waits for its target to be actionable
+/// (visible, enabled, reached by the press) before it fails: about a
+/// second, as long as a screen's transition takes to end.
+const ACTIONABLE_TRIES: u32 = 60;
+/// How many drains a press waits for the focus to land in the field it
+/// pressed: the responder moves on the engine's reply.
+const FOCUS_TRIES: u32 = 50;
+/// How many drains in a row the app must be quiet to have settled: about
+/// 100 ms, as `nsh test`'s agent waits (`nsh_testing::agent`), which
+/// covers the engine's turn from an event to the batch it makes.
+const QUIET_DRAINS: u32 = 7;
+/// How long an action waits for the app to settle at most: an app that
+/// animates for ever still gets its reply.
+const SETTLE: Duration = Duration::from_secs(2);
+/// The longest `wait` a client may ask for: below the server's request
+/// timeout, so the reply still reaches it.
+const MAX_WAIT: Duration = Duration::from_secs(25);
+/// `invoke("viewport", {preset})`'s sizes, in points: a phone, a tablet
+/// upright, and two common laptop and desktop windows.
+const VIEWPORTS: [(&str, f64, f64); 4] = [
+    ("phone", 390.0, 844.0),
+    ("tablet", 820.0, 1180.0),
+    ("laptop", 1280.0, 800.0),
+    ("desktop", 1440.0, 900.0),
+];
+
+/// Starts the server for `surface`, when `GPUI_AGENT` asks for one.
+///
+/// Called for every `AppView`; a `None` config or a failed bind only
+/// logs — the app runs without the agent either way.
+#[cfg(feature = "gpui-agent-server")]
+pub(crate) fn install(surface: &Rc<Surface>) {
+    let config = match agent_config() {
+        Ok(Some(config)) => config,
+        Ok(None) => return,
+        Err(err) => {
+            log::warn!("gpui-agent: {err}");
+            return;
+        }
+    };
+    if channel_is_person(std::env::var("GPUI_AGENT_ACTOR").ok().as_deref()) {
+        crate::provenance::synth_is_person();
+    }
+    let mailbox = AgentMailbox::new();
+    let app = gpui_agent::discovery::detect_identity().executable;
+    match gpui_agent::server::spawn_mailbox_named(
+        config.addr,
+        config.token,
+        mailbox.clone(),
+        REQUEST_TIMEOUT,
+        &app,
+    ) {
+        Ok((addr, _)) => {
+            log::info!("gpui-agent: serving '{app}' on {addr}");
+            schedule(surface.key(), mailbox, VecDeque::new());
+        }
+        Err(err) => log::warn!("gpui-agent: cannot bind {}: {err}", config.addr),
+    }
+}
+
+/// The token in `text`, a token file's contents; `None` for no token.
+#[cfg(feature = "gpui-agent-server")]
+fn token_in(text: &str) -> Option<String> {
+    Some(text.trim().to_owned()).filter(|token| !token.is_empty())
+}
+
+/// The server's terms: the environment's, with the token from
+/// `GPUI_AGENT_TOKEN_FILE` when that names one. `from_env` reads no file, so
+/// the same terms are applied here: `GPUI_AGENT=1`, a release build's own
+/// consent, and the address, which is required.
+#[cfg(feature = "gpui-agent-server")]
+fn agent_config() -> Result<Option<gpui_agent::security::AgentConfig>, String> {
+    let Some(file) = std::env::var_os("GPUI_AGENT_TOKEN_FILE") else {
+        return gpui_agent::security::from_env().map_err(|err| err.to_string());
+    };
+    if !gpui_agent::security::truthy_env("GPUI_AGENT") {
+        return Ok(None);
+    }
+    if !cfg!(debug_assertions) && !gpui_agent::security::truthy_env("GPUI_AGENT_ALLOW_RELEASE") {
+        return Err("a release build serves only with GPUI_AGENT_ALLOW_RELEASE=1".into());
+    }
+    let addr = std::env::var("GPUI_AGENT_ADDR")
+        .map_err(|_| "GPUI_AGENT_TOKEN_FILE needs GPUI_AGENT_ADDR".to_owned())?
+        .parse()
+        .map_err(|_| "GPUI_AGENT_ADDR is no address".to_owned())?;
+    let text = std::fs::read_to_string(file).map_err(|err| err.to_string())?;
+    let token = token_in(&text).ok_or("the token file is empty")?;
+    gpui_agent::security::authorize_bind(addr, Some(&token), false)
+        .map_err(|err| err.to_string())?;
+    Ok(Some(gpui_agent::security::AgentConfig {
+        addr,
+        token: Some(token),
+    }))
+}
+
+/// Whether `GPUI_AGENT_ACTOR` leaves the channel a developer's: a value it
+/// can't read makes it the agent's.
+#[cfg(feature = "gpui-agent-server")]
+fn channel_is_person(actor: Option<&str>) -> bool {
+    matches!(actor, None | Some("person"))
+}
+
+/// Whether `op` does something to the app; what it can't name does.
+fn acts(op: &Op) -> bool {
+    !matches!(
+        op,
+        Op::Hello
+            | Op::Snapshot { .. }
+            | Op::Revision
+            | Op::Wait { .. }
+            | Op::WaitUntil { .. }
+            | Op::Assert { .. }
+            | Op::Screenshot { .. }
+            | Op::Blob { .. }
+            | Op::Keybindings
+    )
+}
+
+/// Re-arms the drain on the main queue while the surface lives.
+///
+/// Requests that read the app are answered at once; actions are jobs,
+/// stepped once per drain, one at a time and in order. Between two drains
+/// the main queue is free, so the app handles the posted input, applies
+/// the engine's batches and runs its animations: an action never blocks
+/// the main thread while it waits for the app.
+#[cfg(feature = "gpui-agent-server")]
+fn schedule(key: u64, mailbox: AgentMailbox, mut jobs: VecDeque<Job>) {
+    nsh_platform_macos::input::later(DRAIN.as_millis() as u64, move || {
+        let Some(surface) = Surface::with_key(key) else {
+            for job in jobs {
+                let id = job.request.request.id.clone();
+                job.request.reply(Response::err(id, "the window is gone"));
+            }
+            return;
+        };
+        for request in mailbox.take() {
+            if acts(&request.request.op) {
+                crate::provenance::agent_acts();
+            }
+            match start(&surface, &request.request) {
+                Start::Done(response) => request.reply(*response),
+                Start::Act(action) => jobs.push_back(Job {
+                    request,
+                    action: Some(action),
+                    phase: Phase::Locate {
+                        tries: 0,
+                        revealed: false,
+                    },
+                }),
+                Start::Settle(timeout, reply) => jobs.push_back(Job {
+                    request,
+                    action: None,
+                    phase: Phase::Settle(Settle::new(timeout, reply)),
+                }),
+            }
+        }
+        // for as long as an action runs: it presses after it was asked to
+        if jobs.iter().any(|job| job.action.is_some()) {
+            crate::provenance::agent_acts();
+        }
+        while let Some(job) = jobs.front_mut() {
+            let Some(result) = step(&surface, &mut job.phase, job.action.as_ref()) else {
+                break;
+            };
+            if let Some(job) = jobs.pop_front() {
+                let id = job.request.request.id.clone();
+                job.request.reply(response(&id, result));
+            }
+        }
+        schedule(key, mailbox, jobs);
+    });
+}
+
+/// What a request starts: an answer now, an action to step, or a wait
+/// for the app to settle.
+enum Start {
+    Done(Box<Response>),
+    Act(Action),
+    Settle(Duration, Reply),
+}
+
+fn response(id: &str, result: Result<DispatchResult, String>) -> Response {
+    match result {
+        Ok(DispatchResult { value }) => {
+            let mut resp = Response::ok(id);
+            resp.result = value;
+            resp
+        }
+        Err(error) => Response::err(id, error),
+    }
+}
+
+/// Answers one request, on the main thread, or makes it an action.
+fn start(surface: &Rc<Surface>, request: &Request) -> Start {
+    let id = &request.id;
+    let result = match &request.op {
+        Op::Hello => {
+            let mut resp = Response::ok(id);
+            resp.hello = Some(hello());
+            return Start::Done(Box::new(resp));
+        }
+        Op::Snapshot {
+            since,
+            format,
+            fingerprints,
+        } => {
+            let mut resp = Response::ok(id);
+            let mut tree = snapshot(surface);
+            if *fingerprints == Some(true) {
+                resp.fingerprints = Some(tree.fingerprint_map());
+            }
+            resp.rev = tree.rev;
+            if *format == Some(SnapshotFormat::Compact) {
+                let size = surface.root().ns().window().and_then(|w| w.contentView());
+                let size = size.map_or((0.0, 0.0), |v| {
+                    let s = v.frame().size;
+                    (s.width as f32, s.height as f32)
+                });
+                tree.nodes = compact(std::mem::take(&mut tree.nodes), size);
+                resp.result = Some(serde_json::json!({
+                    "compact": gpui_agent::compact_lines(&tree),
+                }));
+                return Start::Done(Box::new(resp));
+            }
+            match since {
+                Some(rev) if *rev == revision(&tree) => {
+                    resp.result = Some(serde_json::json!({ "unchanged": true }));
+                }
+                // No earlier trees are kept to diff against: the whole one.
+                Some(_) => {
+                    resp.result = Some(serde_json::json!({ "full": true }));
+                    resp.tree = Some(tree);
+                }
+                None => resp.tree = Some(tree),
+            }
+            return Start::Done(Box::new(resp));
+        }
+        Op::Revision => {
+            let mut resp = Response::ok(id);
+            resp.rev = snapshot(surface).rev;
+            return Start::Done(Box::new(resp));
+        }
+        Op::Wait { timeout_ms } => {
+            let timeout = timeout_ms.map_or(SETTLE, Duration::from_millis);
+            return Start::Settle(timeout.min(MAX_WAIT), Reply::Settled);
+        }
+        Op::Click {
+            target,
+            expect_fingerprint,
+            ..
+        } => return act(surface, id, target, *expect_fingerprint, Gesture::Press),
+        Op::Type {
+            target,
+            text,
+            expect_fingerprint,
+            ..
+        } => {
+            return act(
+                surface,
+                id,
+                target,
+                *expect_fingerprint,
+                Gesture::Type(text.clone()),
+            );
+        }
+        Op::SetValue {
+            target,
+            value,
+            expect_fingerprint,
+        } => {
+            return act(
+                surface,
+                id,
+                target,
+                *expect_fingerprint,
+                Gesture::SetValue(value.clone()),
+            );
+        }
+        Op::Key {
+            target,
+            key,
+            expect_fingerprint,
+            ..
+        } => {
+            return act(
+                surface,
+                id,
+                target,
+                *expect_fingerprint,
+                Gesture::Key(key.clone()),
+            );
+        }
+        Op::Keybinding {
+            binding,
+            chord,
+            scope,
+            confirm,
+            activate,
+        } => {
+            let request = KeybindingRequest {
+                binding,
+                chord: chord.as_deref(),
+                scope: *scope,
+                confirm: *confirm,
+                activate: *activate,
+            };
+            match keybinding(surface, request) {
+                Ok(()) => return Start::Settle(SETTLE, Reply::Action),
+                Err(err) => Err(err),
+            }
+        }
+        Op::Assert { spec } => assert_spec(surface, spec),
+        Op::Invoke { name, args } if name == "viewport" => match surface.root().ns().window() {
+            None => Err("the window is gone".into()),
+            Some(window) => match viewport_size(args, window.backingScaleFactor()) {
+                Ok((w, h)) => {
+                    window.setContentSize(objc2_foundation::NSSize::new(w, h));
+                    return Start::Settle(SETTLE, Reply::Viewport { w, h });
+                }
+                Err(err) => Err(err),
+            },
+        },
+        Op::Invoke { name, args } => match invoke_action(name, args) {
+            Some(Ok(action)) => {
+                let expect = args.get("expect_fingerprint").and_then(|v| v.as_u64());
+                if let Some(target) = &action.target
+                    && let Some(err) = stale(surface, target, expect)
+                {
+                    Err(err)
+                } else {
+                    return Start::Act(action);
+                }
+            }
+            Some(Err(err)) => Err(err),
+            None => Err(format!("unknown invoke: {name}")),
+        },
+        Op::Screenshot { path, mode, .. } => screenshot(surface, path.as_deref(), *mode),
+        Op::Shutdown => with_window(surface, |window| window.close()),
+        Op::Keybindings => {
+            let infos: Vec<_> = catalog(surface).into_iter().map(|e| e.info).collect();
+            Ok(DispatchResult::json(keybinding_list_json(&infos)))
+        }
+        Op::WaitUntil { .. } => Err("wait_until is served by the server".into()),
+        // Operations this host does not list in `hello.features`.
+        Op::Events { .. } => Err(gpui_agent::unsupported_op("events")),
+        Op::Blob { .. } => Err(gpui_agent::unsupported_op("blob")),
+        Op::Press { .. } => Err(gpui_agent::unsupported_op("press")),
+        Op::Scroll { .. } => Err(gpui_agent::unsupported_op("scroll")),
+        Op::Hover { .. } => Err(gpui_agent::unsupported_op("hover")),
+        Op::Drag { .. } => Err(gpui_agent::unsupported_op("drag")),
+        Op::Swipe { .. } => Err(gpui_agent::unsupported_op("swipe")),
+        Op::LongPress { .. } => Err(gpui_agent::unsupported_op("long_press")),
+        Op::Pinch { .. } => Err(gpui_agent::unsupported_op("pinch")),
+        Op::Viewport { .. } => Err(gpui_agent::unsupported_op("viewport")),
+        Op::Paste { .. } => Err(gpui_agent::unsupported_op("paste")),
+        Op::System { .. } => Err(gpui_agent::unsupported_op("system")),
+    };
+    Start::Done(Box::new(response(id, result)))
+}
+
+/// An action on `target`, after the fingerprint gate. `delivery` is
+/// accepted for either mode: this host's one path posts real events.
+fn act(
+    surface: &Rc<Surface>,
+    id: &str,
+    target: &str,
+    expect_fingerprint: Option<u64>,
+    gesture: Gesture,
+) -> Start {
+    if let Some(err) = stale(surface, target, expect_fingerprint) {
+        return Start::Done(Box::new(Response::err(id, err)));
+    }
+    Start::Act(Action {
+        target: Some(target.to_owned()),
+        at: None,
+        gesture,
+        background: false,
+    })
+}
+
+/// What a caller in the process does to a node ([`act`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiAct {
+    /// Presses it.
+    Press,
+    /// Presses it, then types `text` at the end of what it holds.
+    Type(String),
+    /// Presses it, then replaces what it holds with the text.
+    SetValue(String),
+}
+
+impl UiAct {
+    fn gesture(self) -> Gesture {
+        match self {
+            UiAct::Press => Gesture::Press,
+            UiAct::Type(text) => Gesture::Type(text),
+            UiAct::SetValue(text) => Gesture::SetValue(text),
+        }
+    }
+}
+
+/// Acts on the node `target` of `surface` as an agent, for a caller in
+/// the process: an action as a request's, stepped on the main queue, and
+/// `done` hears how it ended once the app settled. Needs no server. Each
+/// step tells the app ([`crate::provenance::Input::Agent`]), so what the
+/// action starts is the agent's before its first event.
+pub(crate) fn act_in_process(
+    surface: &Rc<Surface>,
+    target: &str,
+    act: UiAct,
+    still: Still,
+    done: impl FnOnce(Result<(), String>) + Send + 'static,
+) {
+    let action = Action {
+        target: Some(target.to_owned()),
+        at: None,
+        gesture: act.gesture(),
+        background: true,
+    };
+    let phase = Phase::Locate {
+        tries: 0,
+        revealed: false,
+    };
+    drive(
+        surface.key(),
+        phase,
+        action,
+        still,
+        AgentRun::start(Box::new(done)),
+    );
+}
+
+/// The caller's word that the screen is still the one it decided on. Asked on
+/// the main thread.
+type Still = Box<dyn Fn() -> bool + Send>;
+
+/// What a step that found the screen changed ends with: a code, then why.
+pub const SCREEN_CHANGED: &str = "screen_changed";
+
+/// Whether the step after `phase` may run. The input is given in the step of
+/// [`Phase::Locate`], in the turn right after this: a screen that moved since
+/// the caller decided gets no press. Once pressed, the press itself moves it.
+fn may_step(phase: &Phase, still: &dyn Fn() -> bool) -> bool {
+    !matches!(phase, Phase::Locate { .. }) || still()
+}
+
+/// An in-process action while it runs. However it ends, the caller hears
+/// and the run is over: a step that panics or a timer that never fires
+/// drops this.
+struct AgentRun {
+    done: Option<Done>,
+}
+
+/// Who hears how an in-process action ended.
+type Done = Box<dyn FnOnce(Result<(), String>) + Send>;
+
+impl AgentRun {
+    fn start(done: Done) -> AgentRun {
+        crate::provenance::agent_run(true);
+        AgentRun { done: Some(done) }
+    }
+
+    fn finish(mut self, result: Result<(), String>) {
+        if let Some(done) = self.done.take() {
+            done(result);
+        }
+    }
+}
+
+impl Drop for AgentRun {
+    fn drop(&mut self) {
+        crate::provenance::agent_run(false);
+        if let Some(done) = self.done.take() {
+            done(Err("the action stopped".into()));
+        }
+    }
+}
+
+/// Steps an in-process action once per drain until it ends.
+fn drive(key: u64, mut phase: Phase, action: Action, still: Still, run: AgentRun) {
+    nsh_platform_macos::input::later(DRAIN.as_millis() as u64, move || {
+        let Some(surface) = Surface::with_key(key) else {
+            return run.finish(Err("the window is gone".into()));
+        };
+        crate::provenance::agent_step();
+        if !may_step(&phase, &*still) {
+            return run.finish(Err(format!("{SCREEN_CHANGED}: before the press")));
+        }
+        match step(&surface, &mut phase, Some(&action)) {
+            Some(result) => run.finish(result.map(drop)),
+            None => drive(key, phase, action, still, run),
+        }
+    });
+}
+
+fn hello() -> HelloInfo {
+    let mut hello = HelloInfo {
+        protocol: PROTOCOL_VERSION,
+        app: gpui_agent::discovery::detect_identity().executable,
+        platform: PlatformKind::Desktop,
+        os: gpui_agent::protocol::host_os(),
+        ready: true,
+        deliveries: vec![DeliveryMode::Semantic, DeliveryMode::Virtual],
+        auth: Default::default(),
+        bundle_id: None,
+        executable: None,
+        features: vec![],
+        framework: Some("nsh".into()),
+        device: None,
+    };
+    gpui_agent::discovery::fill_hello_identity(&mut hello);
+    hello
+}
+// --- Snapshot ---------------------------------------------------------------
+
+/// The semantic tree of `surface`: every view that is an accessibility
+/// element, in subview order, as VoiceOver would list it.
+pub(crate) fn snapshot(surface: &Rc<Surface>) -> UiTree {
+    let mut nodes = Vec::new();
+    let window = surface.root().ns().window();
+    if let Some(window) = window.as_deref() {
+        let top = Scope::top(surface);
+        for child in surface.root().child_views() {
+            collect(&top, &child, window, &mut nodes);
+        }
+    }
+    let mut tree = UiTree {
+        app: gpui_agent::discovery::detect_identity().executable,
+        platform: PlatformKind::Desktop,
+        ready: true,
+        nodes,
+        rev: None,
+    };
+    tree.rev = Some(revision(&tree));
+    tree
+}
+
+/// The roles a user operates.
+const INTERACTIVE: [&str; 14] = [
+    "button",
+    "link",
+    "textfield",
+    "search",
+    "checkbox",
+    "switch",
+    "radio",
+    "slider",
+    "combobox",
+    "menuitem",
+    "tab",
+    "option",
+    "spinbutton",
+    "treeitem",
+];
+
+/// `snapshot {format: "compact"}`'s tree: the interactive nodes that
+/// show in a `width` × `height` window, and the nodes they are in, whose
+/// names say where they are. A live app's whole tree runs to thousands
+/// of nodes (rows scrolled away, every label); this is what an agent
+/// can act on now.
+fn compact(nodes: Vec<UiNode>, (width, height): (f32, f32)) -> Vec<UiNode> {
+    nodes
+        .into_iter()
+        .filter(|node| node.visible)
+        .filter_map(|mut node| {
+            node.children = compact(std::mem::take(&mut node.children), (width, height));
+            let b = node.bounds;
+            let shows =
+                b.has_area() && b.x < width && b.y < height && b.x + b.w > 0.0 && b.y + b.h > 0.0;
+            let acts = shows && INTERACTIVE.contains(&node.role.as_str());
+            (acts || !node.children.is_empty()).then_some(node)
+        })
+        .collect()
+}
+
+/// The tree's revision: a hash of what it says, so an equal revision is
+/// an equal tree. `wait_until` skips its assert while the revision
+/// stands, which a counter of batches would get wrong (a scroll moves
+/// nodes in and out of the viewport without one).
+fn revision(tree: &UiTree) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_vec(&tree.nodes)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Where `view` lands in the semantic tree: hidden views exclude their
+/// whole subtree, a grouped view is one element (its children are not
+/// exposed), a plain layout box passes through to its descendants, and
+/// anything else is a node.
+enum Place {
+    Hidden,
+    Grouped(UiNode),
+    Node(UiNode),
+    Pass,
+}
+
+/// Adds `view`'s exposed element descendants to `nodes` under its own
+/// node, or flattens them when `view` is a pass-through box, then the
+/// surfaces it hosts ([`embed`]). Hidden views are pruned whole: nothing
+/// under them is ever exposed.
+fn collect(scope: &Rc<Scope>, view: &NshView, window: &NSWindow, nodes: &mut Vec<UiNode>) {
+    match place(view, window, &scope.prefix) {
+        Place::Hidden => {}
+        Place::Grouped(mut node) => {
+            measure(scope, view, window, &mut node);
+            node.children = Vec::new();
+            nodes.push(node);
+        }
+        Place::Node(mut node) => {
+            measure(scope, view, window, &mut node);
+            for child in view.child_views() {
+                collect(scope, &child, window, &mut node.children);
+            }
+            embed(scope, view, window, &mut node.children);
+            nodes.push(node);
+        }
+        Place::Pass => {
+            for child in view.child_views() {
+                collect(scope, &child, window, nodes);
+            }
+            embed(scope, view, window, nodes);
+        }
+    }
+}
+
+/// Adds the surfaces `host` embeds to `nodes`: each one's node
+/// ([`surface_node`]) with its tree, after `host`'s own children, as its
+/// hosted views lie above them.
+fn embed(scope: &Rc<Scope>, host: &NshView, window: &NSWindow, nodes: &mut Vec<UiNode>) {
+    for inner in embedded(scope, host) {
+        let mut children = Vec::new();
+        for child in inner.surface.root().child_views() {
+            collect(&inner, &child, window, &mut children);
+        }
+        let mut node = surface_node(&inner.id, host_name(host), children);
+        measure(&inner, &inner.surface.root(), window, &mut node);
+        nodes.push(node);
+    }
+}
+
+/// The semantic place of `view`: VoiceOver goes through a plain layout
+/// box to its children, and so do we. Its node has no geometry yet
+/// ([`measure`]): finding a target needs none. Its id starts with
+/// `prefix`, its surface's ([`Scope::prefix`]).
+fn place(view: &NshView, window: &NSWindow, prefix: &str) -> Place {
+    let spec = spec_of(view);
+    let text_field = view.kind() == ViewKind::Input
+        && view.accessibility().role == nsh_core::AccessibilityRole::None;
+    let (test_id, text_input, masked, typed) = {
+        let input = view.input();
+        let masked = input.as_ref().and_then(|input| input.masked_len());
+        let typed = input.as_ref().map(|input| input.plain_text());
+        (view.test_id(), input.is_some(), masked, typed)
+    };
+    if spec.hidden {
+        return Place::Hidden;
+    }
+    if spec.role == Ax::Generic && !text_field {
+        return Place::Pass;
+    }
+    let id = match test_id.as_deref() {
+        Some(test_id) => format!("{prefix}{test_id}"),
+        None => format!("{prefix}n{}", view.id()),
+    };
+    let role = if text_field {
+        "textfield"
+    } else {
+        role_name(spec.role)
+    };
+    let mut node = UiNode::new(id, role, spec.label.clone().unwrap_or_default());
+    node.enabled = !spec.disabled;
+    node.focused = text_input && focused_in(view, window);
+    // a field holds what was typed, whatever its accessibility value says
+    node.value = typed.or_else(|| value_text(&spec.value));
+    node.checked = match spec.value {
+        Value::Checked(v) => Some(v != 0),
+        _ => None,
+    };
+    if let Some(chars) = masked {
+        mask(&mut node, chars);
+    }
+    if spec.selected {
+        node.states.push("selected".into());
+    }
+    if let Some(expanded) = spec.expanded {
+        node.states.push(if expanded {
+            "expanded".into()
+        } else {
+            "collapsed".into()
+        });
+    }
+    if spec.grouped {
+        node.states.push("grouped".into());
+        return Place::Grouped(node);
+    }
+    Place::Node(node)
+}
+
+/// Fills in where `view`'s node is: its bounds in the window's content,
+/// and whether it can be seen, by the rule actions follow
+/// ([`visibility`]). A node a scroll view has out of its viewport is
+/// visible, not in the viewport: scrolling brings it in.
+fn measure(scope: &Scope, view: &NshView, window: &NSWindow, node: &mut UiNode) {
+    node.visible = visibility(scope, view, window).visible();
+    node.bounds = in_window(view.ns(), view.ns().bounds(), window)
+        .map(|b| TreeBounds {
+            x: b.origin.x.0,
+            y: b.origin.y.0,
+            w: b.size.width.0,
+            h: b.size.height.0,
+        })
+        .unwrap_or_default();
+}
+
+fn role_name(role: Ax) -> &'static str {
+    match role {
+        Ax::Generic => "generic",
+        // A button that stays on or off: ARIA's button with `aria-pressed`.
+        Ax::Button | Ax::Toggle => "button",
+        Ax::Link => "link",
+        Ax::Text => "text",
+        Ax::Image => "image",
+        Ax::Group => "group",
+        Ax::Heading => "heading",
+        Ax::Slider => "slider",
+        Ax::CheckBox => "checkbox",
+        Ax::Switch => "switch",
+        Ax::Radio => "radio",
+        Ax::RadioGroup => "radiogroup",
+        Ax::ComboBox => "combobox",
+        Ax::Menu => "menu",
+        Ax::MenuBar => "menubar",
+        Ax::MenuItem => "menuitem",
+        Ax::Progress => "progress",
+        Ax::ScrollBar => "scrollbar",
+        Ax::SpinButton => "spinbutton",
+        Ax::Tab => "tab",
+        Ax::TabList => "tablist",
+        Ax::Toolbar => "toolbar",
+        Ax::List => "list",
+        Ax::Grid => "grid",
+        Ax::Row => "row",
+        Ax::Cell => "cell",
+        Ax::Search => "search",
+        Ax::Alert => "alert",
+        Ax::Status => "status",
+        Ax::Timer => "timer",
+        Ax::Option => "option",
+        Ax::Region => "region",
+        Ax::Navigation => "navigation",
+        Ax::TreeItem => "treeitem",
+        // As the shared adapter names a scroll view (`nsh-testing`).
+        Ax::ScrollArea => "scroll",
+        Ax::Dialog => "dialog",
+        Ax::AlertDialog => "alertdialog",
+        // The window's own buttons, a view standing for each.
+        Ax::CloseButton | Ax::MinimizeButton | Ax::ZoomButton => "button",
+    }
+}
+
+/// Hides a masked input's text: its value becomes a bullet per character
+/// (`chars`), as a secure field shows it, whatever the app set as its
+/// accessibility value, and a `masked` state says so. Every reply reads
+/// nodes [`place`] made, so none can carry the text.
+fn mask(node: &mut UiNode, chars: usize) {
+    node.value = Some("\u{2022}".repeat(chars));
+    node.states.push("masked".into());
+}
+
+fn value_text(value: &Value) -> Option<String> {
+    match value {
+        Value::None => None,
+        Value::Text(text) => Some(text.clone()),
+        Value::Checked(v) => Some(v.to_string()),
+        Value::Range { now, text, .. } => text
+            .as_deref()
+            .map(str::to_owned)
+            .or(now.map(|n| n.to_string())),
+    }
+}
+
+// --- Embedded surfaces ------------------------------------------------------
+
+/// A surface as the agent walks it: the window's own, or one embedded in
+/// a view of another (an `AppView` a native component hosts, such as a
+/// mini app in a card), with where it is hosted.
+struct Scope {
+    surface: Rc<Surface>,
+    /// The view hosting it and that view's scope; `None` for the
+    /// window's surface.
+    host: Option<(NshView, Rc<Scope>)>,
+    /// Its node's id ([`surface_id`]); empty for the window's surface,
+    /// which has no node of its own.
+    id: String,
+    /// What the ids of its nodes start with: `<id>:`, nothing for the
+    /// window's surface.
+    prefix: String,
+}
+
+impl Scope {
+    /// The window's surface.
+    fn top(surface: &Rc<Surface>) -> Rc<Scope> {
+        Rc::new(Scope {
+            surface: surface.clone(),
+            host: None,
+            id: String::new(),
+            prefix: String::new(),
+        })
+    }
+
+    /// `surface`, embedded in `host`, a view of this scope.
+    fn inner(self: &Rc<Self>, host: &NshView, surface: Rc<Surface>) -> Rc<Scope> {
+        let id = surface_id(&self.prefix, surface.key());
+        Rc::new(Scope {
+            prefix: format!("{id}:"),
+            id,
+            surface,
+            host: Some((host.clone(), self.clone())),
+        })
+    }
+
+    /// Whether `surface` is this one or one it is embedded in.
+    fn holds(&self, surface: &Rc<Surface>) -> bool {
+        Rc::ptr_eq(&self.surface, surface)
+            || self
+                .host
+                .as_ref()
+                .is_some_and(|(_, outer)| outer.holds(surface))
+    }
+
+    /// The surfaces from the window's to this one.
+    fn surfaces(&self) -> Vec<Rc<Surface>> {
+        let mut out = self
+            .host
+            .as_ref()
+            .map_or_else(Vec::new, |(_, outer)| outer.surfaces());
+        out.push(self.surface.clone());
+        out
+    }
+}
+
+/// The id of the node of the surface with `key`, embedded in a surface
+/// whose ids start with `prefix`: `s<key>` after it. Surface keys are
+/// unique in the process and kept for a surface's life, so the ids under
+/// it (`s<key>:n<node>`, `s<key>:<testID>`) are unique in the tree and
+/// stable while the embedded app runs; a host that loads it again in a
+/// new surface gives it a new key.
+fn surface_id(prefix: &str, key: u64) -> String {
+    format!("{prefix}s{key}")
+}
+
+/// The id prefix of a surface embedded in the surfaces with `keys`, from
+/// the outermost (the window's own left out), as [`Scope::inner`] makes
+/// it.
+fn prefix_of_keys(keys: impl IntoIterator<Item = u64>) -> String {
+    keys.into_iter()
+        .fold(String::new(), |prefix, key| surface_id(&prefix, key) + ":")
+}
+
+/// The id prefix of the surface `view` is in: the keys of the surfaces
+/// whose roots it is in, up AppKit's views, but the window's.
+fn prefix_of(view: &NshView) -> String {
+    let mut keys = Vec::new();
+    let mut current = Some(view.ns().retain());
+    while let Some(ns) = current {
+        if let Some(surface) = NshView::from_ns(&ns).and_then(|v| v.surface()) {
+            keys.push(surface.key());
+        }
+        current = nsh_platform_macos::view::superview(&ns);
+    }
+    keys.pop();
+    prefix_of_keys(keys.into_iter().rev())
+}
+
+/// An embedded surface's node: a group with `id` that holds its tree.
+fn surface_node(id: &str, name: String, children: Vec<UiNode>) -> UiNode {
+    let mut node = UiNode::new(id, "group", name);
+    node.children = children;
+    node
+}
+
+/// What an embedded surface's node is named: its host's label (a native
+/// component has none unless the app gives it one).
+fn host_name(host: &NshView) -> String {
+    spec_of(host).label.unwrap_or_default()
+}
+
+/// The surfaces `host` (of `scope`) embeds, in its hosted views' order:
+/// a root of another surface anywhere in a hosted AppKit view's subtree,
+/// in the window and not hidden. Surfaces of `scope`'s chain are left out,
+/// so a cycle cannot recurse.
+fn embedded(scope: &Rc<Scope>, host: &NshView) -> Vec<Rc<Scope>> {
+    fn roots(ns: &NSView, out: &mut Vec<Rc<Surface>>) {
+        if let Some(surface) = NshView::from_ns(ns).and_then(|v| v.surface()) {
+            out.push(surface);
+            return;
+        }
+        for sub in ns.subviews().iter() {
+            roots(&sub, out);
+        }
+    }
+    let natives: Vec<_> = host.native_views();
+    let mut surfaces = Vec::new();
+    for native in &natives {
+        roots(native, &mut surfaces);
+    }
+    surfaces
+        .into_iter()
+        .filter(|s| {
+            let surface_root = s.root();
+            let root = surface_root.ns();
+            !scope.holds(s) && root.window().is_some() && !root.isHiddenOrHasHiddenAncestor()
+        })
+        .map(|s| scope.inner(host, s))
+        .collect()
+}
+
+// --- Targets ----------------------------------------------------------------
+
+/// A node of the snapshot: its surface, its view, its node (measured)
+/// and its parent node's id, which the node's fingerprint covers.
+struct Found {
+    scope: Rc<Scope>,
+    view: NshView,
+    node: UiNode,
+    parent: Option<String>,
+}
+
+/// The view `target` names, and its surface: a `testID`, a `n<node>` id
+/// (prefixed in an embedded surface), or — so agents can act without the
+/// app naming every control — a node's name.
+fn resolve(surface: &Rc<Surface>, target: &str) -> Option<(Rc<Scope>, NshView)> {
+    find(surface, target).map(|found| (found.scope, found.view))
+}
+
+/// The node `target` names, among exactly the nodes the snapshot shows,
+/// in its order: ids win over names, and a name goes to its first node.
+/// A view the snapshot leaves out (hidden, under a grouped element, a
+/// plain box even with a `testID`) cannot be targeted.
+fn find(surface: &Rc<Surface>, target: &str) -> Option<Found> {
+    let window = surface.root().ns().window()?;
+    let top = Scope::top(surface);
+    let mut by_name = None;
+    let found = surface
+        .root()
+        .child_views()
+        .iter()
+        .find_map(|child| find_in(&top, child, &window, target, None, &mut by_name));
+    let mut found = found.or(by_name)?;
+    measure(&found.scope, &found.view, &window, &mut found.node);
+    Some(found)
+}
+
+fn find_in(
+    scope: &Rc<Scope>,
+    view: &NshView,
+    window: &NSWindow,
+    target: &str,
+    parent: Option<&str>,
+    by_name: &mut Option<Found>,
+) -> Option<Found> {
+    let (node, children) = match place(view, window, &scope.prefix) {
+        Place::Hidden => return None,
+        Place::Pass => {
+            return view
+                .child_views()
+                .iter()
+                .find_map(|child| find_in(scope, child, window, target, parent, by_name))
+                .or_else(|| find_embedded(scope, view, window, target, parent, by_name));
+        }
+        Place::Grouped(node) => (node, false),
+        Place::Node(node) => (node, true),
+    };
+    let found = |node: UiNode| Found {
+        scope: scope.clone(),
+        view: view.clone(),
+        node,
+        parent: parent.map(str::to_owned),
+    };
+    if node.id == target {
+        return Some(found(node));
+    }
+    let id = node.id.clone();
+    if by_name.is_none() && node.name == target {
+        *by_name = Some(found(node));
+    }
+    if !children {
+        return None;
+    }
+    view.child_views()
+        .iter()
+        .find_map(|child| find_in(scope, child, window, target, Some(&id), by_name))
+        .or_else(|| find_embedded(scope, view, window, target, Some(&id), by_name))
+}
+
+/// [`find_in`] the surfaces `host` embeds, as [`embed`] lists them.
+fn find_embedded(
+    scope: &Rc<Scope>,
+    host: &NshView,
+    window: &NSWindow,
+    target: &str,
+    parent: Option<&str>,
+    by_name: &mut Option<Found>,
+) -> Option<Found> {
+    for inner in embedded(scope, host) {
+        let root = inner.surface.root();
+        let node = surface_node(&inner.id, host_name(host), Vec::new());
+        let named = by_name.is_none() && node.name == target;
+        if node.id == target || named {
+            let found = Found {
+                scope: inner.clone(),
+                view: root.clone(),
+                node,
+                parent: parent.map(str::to_owned),
+            };
+            if found.node.id == target {
+                return Some(found);
+            }
+            *by_name = Some(found);
+        }
+        let found = root
+            .child_views()
+            .iter()
+            .find_map(|child| find_in(&inner, child, window, target, Some(&inner.id), by_name));
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+/// Fingerprint gate: the node the client saw must still be this one. The
+/// fingerprint is the snapshot's ([`UiTree::fingerprint_map`]): its
+/// parent's id is part of it.
+fn stale(surface: &Rc<Surface>, target: &str, expect: Option<u64>) -> Option<String> {
+    let expect = expect?;
+    let found = find(surface, target)?;
+    let got = found.node.fingerprint(found.parent.as_deref());
+    (got != expect).then(|| format!("stale_target: {target}"))
+}
+
+/// `view`'s accessibility, as [`place`] reads it.
+fn spec_of(view: &NshView) -> access::Spec {
+    let events = view.events();
+    let pressable = events.contains(EventKind::Press) || events.contains(EventKind::LongPress);
+    let text_arc = view.text();
+    let text = text_arc.as_ref().map(|t| t.text.as_str());
+    access::spec_for(
+        &view.accessibility(),
+        view.kind(),
+        pressable,
+        text,
+        view.style_hidden(),
+    )
+}
+
+/// How a client names `view` in an error: its id, and its name if it has
+/// one.
+fn describe(view: &NshView) -> String {
+    let prefix = prefix_of(view);
+    let id = match view.test_id().as_deref() {
+        Some(test_id) => format!("{prefix}{test_id}"),
+        None => format!("{prefix}n{}", view.id()),
+    };
+    match spec_of(view).label {
+        Some(label) if !label.is_empty() => format!("{id} {label:?}"),
+        _ => id,
+    }
+}
+
+/// `stroke` as `synth::key` names it: modifiers, then the key.
+fn keystroke_name(stroke: &nsh_core::keymap::Keystroke) -> String {
+    use nsh_core::keymap::Key;
+    let mut name = String::new();
+    let m = stroke.modifiers;
+    for (on, prefix) in [
+        (m.cmd, "cmd+"),
+        (m.ctrl, "ctrl+"),
+        (m.alt, "alt+"),
+        (m.shift, "shift+"),
+    ] {
+        if on {
+            name.push_str(prefix);
+        }
+    }
+    name.push_str(&match stroke.key {
+        Key::Char(' ') => "space".into(),
+        Key::Char(c) => c.to_string(),
+        Key::Enter => "Return".into(),
+        Key::Escape => "Escape".into(),
+        Key::Tab => "Tab".into(),
+        Key::Backspace => "BackSpace".into(),
+        Key::Delete => "Delete".into(),
+        Key::Insert => "Help".into(),
+        Key::Up => "Up".into(),
+        Key::Down => "Down".into(),
+        Key::Left => "Left".into(),
+        Key::Right => "Right".into(),
+        Key::Home => "Home".into(),
+        Key::End => "End".into(),
+        Key::PageUp => "Page_Up".into(),
+        Key::PageDown => "Page_Down".into(),
+        Key::F(n) => format!("F{n}"),
+    });
+    name
+}
+
+type Span = (f32, f32, f32, f32);
+
+fn placed(rect: NSRect) -> Span {
+    (
+        rect.origin.x as f32,
+        rect.origin.y as f32,
+        (rect.origin.x + rect.size.width) as f32,
+        (rect.origin.y + rect.size.height) as f32,
+    )
+}
+
+fn clip_span(
+    rect: Span,
+    ancestors: impl IntoIterator<Item = (Span, (f32, f32), bool)>,
+) -> Option<Span> {
+    let (mut x0, mut y0, mut x1, mut y1) = rect;
+    for (frame, (ox, oy), clips) in ancestors {
+        if clips {
+            let (w, h) = (frame.2 - frame.0, frame.3 - frame.1);
+            x0 = x0.max(ox);
+            y0 = y0.max(oy);
+            x1 = x1.min(ox + w);
+            y1 = y1.min(oy + h);
+            if x1 <= x0 || y1 <= y0 {
+                return None;
+            }
+        }
+        x0 += frame.0 - ox;
+        x1 += frame.0 - ox;
+        y0 += frame.1 - oy;
+        y1 += frame.1 - oy;
+    }
+    Some((x0, y0, x1, y1))
+}
+
+/// The part of `view` not clipped away, in its root's coordinates.
+fn shown_part(view: &NshView) -> Option<NSRect> {
+    let ns = view.ns();
+    if ns.window().is_none() || ns.isHiddenOrHasHiddenAncestor() {
+        return None;
+    }
+    let ancestors = std::iter::successors(view.parent_view(), NshView::parent_view).map(|p| {
+        (
+            placed(p.ns().frame()),
+            nsh_platform_macos::scroll::bounds_origin(&p),
+            p.clips_children() || p.id() == nsh_core::ROOT_ID,
+        )
+    });
+    let (x0, y0, x1, y1) = clip_span(placed(ns.frame()), ancestors)?;
+    let root = std::iter::successors(view.parent_view(), NshView::parent_view).last()?;
+    let origin = root.ns().frame().origin;
+    Some(NSRect::new(
+        objc2_foundation::NSPoint::new(f64::from(x0) - origin.x, f64::from(y0) - origin.y),
+        objc2_foundation::NSSize::new(f64::from(x1 - x0), f64::from(y1 - y0)),
+    ))
+}
+
+// --- Actions ----------------------------------------------------------------
+
+/// A request in flight ([`schedule`]): an action, or a wait.
+struct Job {
+    request: MailboxRequest,
+    action: Option<Action>,
+    phase: Phase,
+}
+
+/// What an input request does, and where.
+#[derive(Debug, PartialEq)]
+struct Action {
+    /// The node it acts on; `None` acts at `at` or the window's middle.
+    target: Option<String>,
+    /// An explicit point (content points from the top left), which wins
+    /// over `target`: for content no node names, such as a mini app's.
+    at: Option<(f64, f64)>,
+    gesture: Gesture,
+    /// It leaves the app as active or inactive as it found it.
+    background: bool,
+}
+
+/// The input of an [`Action`].
+#[derive(Debug, PartialEq)]
+enum Gesture {
+    /// Hover, down, up.
+    Press,
+    /// A press, then the text once the field has the focus.
+    Type(String),
+    /// A press, then Select All and the text.
+    SetValue(String),
+    /// A press, then a key.
+    Key(String),
+    /// A pointer move with no press.
+    Hover,
+    /// A press-drag-release of `(dx, dy)` points.
+    Drag { dx: f64, dy: f64 },
+    /// A trackpad gesture of `(dx, dy)` points and `momentum` more.
+    Scroll { dx: f64, dy: f64, momentum: f64 },
+}
+
+impl Gesture {
+    /// It sends keys after its press, which must have focused the target:
+    /// keys must not land on whatever held the focus before.
+    fn types(&self) -> bool {
+        matches!(
+            self,
+            Gesture::Type(_) | Gesture::SetValue(_) | Gesture::Key(_)
+        )
+    }
+
+    /// It activates the app (when it is not active already) before its
+    /// input: only the gestures that send keys, which want the window key
+    /// as a user's typing has it. Pointer gestures never do, so driving a
+    /// test app leaves the focus with the app in use: presses and drags
+    /// are posted to the app itself and nsh's views take a click in an
+    /// inactive window (`acceptsFirstMouse`), hovers go to its input and
+    /// scrolls to its window directly.
+    fn activates(&self) -> bool {
+        self.types()
+    }
+}
+
+/// Where a [`Job`] is.
+enum Phase {
+    /// Waiting for the target to be actionable; `revealed`: its scroll
+    /// views were scrolled to bring it in.
+    Locate { tries: u32, revealed: bool },
+    /// Pressed; waiting for the focus to land in the target.
+    Focus { tries: u32 },
+    /// The input is given; waiting for the app to settle.
+    Settle(Settle),
+}
+
+/// The wait for the app to settle: no batches coming or waiting, no
+/// native animation, no display frame JS asked for, for
+/// [`QUIET_DRAINS`] drains in a row, until a deadline. An action replies
+/// once it is over, so the next snapshot sees what it did.
+struct Settle {
+    until: Instant,
+    /// The batch count the quiet drains saw.
+    batches: Option<u64>,
+    quiet: u32,
+    reply: Reply,
+}
+
+/// What a request replies once the app settled.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Reply {
+    /// An action's: nothing, or `{settled: false}` when it did not.
+    Action,
+    /// `wait`'s: `{settled}`.
+    Settled,
+    /// `invoke("viewport")`'s: the size the window's content got, which
+    /// the screen may have held below the `w` × `h` asked for.
+    Viewport { w: f64, h: f64 },
+}
+
+impl Settle {
+    fn new(timeout: Duration, reply: Reply) -> Settle {
+        Settle {
+            until: Instant::now() + timeout,
+            batches: None,
+            quiet: 0,
+            reply,
+        }
+    }
+
+    /// One drain's look at the app's activity ([`Surface::activity`]):
+    /// `Some(settled)` once it is over.
+    fn poll(&mut self, (batches, busy): (u64, bool), now: Instant) -> Option<bool> {
+        if busy || self.batches != Some(batches) {
+            self.quiet = 0;
+            self.batches = Some(batches);
+        } else {
+            self.quiet += 1;
+        }
+        if self.quiet >= QUIET_DRAINS {
+            return Some(true);
+        }
+        (now >= self.until).then_some(false)
+    }
+
+    /// The reply; `window` gives the viewport's applied size.
+    fn result(&self, settled: bool, window: Option<&NSWindow>) -> DispatchResult {
+        match self.reply {
+            Reply::Action if settled => DispatchResult::empty(),
+            Reply::Action | Reply::Settled => {
+                DispatchResult::json(serde_json::json!({ "settled": settled }))
+            }
+            Reply::Viewport { w, h } => {
+                let size = window.and_then(|w| w.contentView()).map(|v| v.frame().size);
+                DispatchResult::json(serde_json::json!({
+                    "w": size.map(|s| s.width),
+                    "h": size.map(|s| s.height),
+                    "scale": window.map(|w| w.backingScaleFactor()),
+                    "requested": { "w": w, "h": h },
+                    "settled": settled,
+                }))
+            }
+        }
+    }
+}
+
+/// The content size `invoke("viewport", args)` asks for: `{w, h}` in
+/// points, or a `{preset}` of [`VIEWPORTS`]. A window's backing scale is
+/// its screen's, which macOS does not let an app choose: asking for
+/// another `scale` than `current` fails rather than pretending.
+fn viewport_size(args: &serde_json::Value, current: f64) -> Result<(f64, f64), String> {
+    let num = |key: &str| args.get(key).and_then(|v| v.as_f64());
+    if let Some(scale) = num("scale")
+        && scale != current
+    {
+        return Err(format!(
+            "scale_unsupported: macOS gives a window its screen's backing scale ({current}); \
+             it cannot be {scale}"
+        ));
+    }
+    if let Some(preset) = args.get("preset").and_then(|v| v.as_str()) {
+        return VIEWPORTS
+            .iter()
+            .find(|(name, ..)| *name == preset)
+            .map(|&(_, w, h)| (w, h))
+            .ok_or_else(|| {
+                let names: Vec<_> = VIEWPORTS.iter().map(|(name, ..)| *name).collect();
+                format!(
+                    "unknown viewport preset `{preset}` (one of {})",
+                    names.join(", ")
+                )
+            });
+    }
+    match (num("w"), num("h")) {
+        (Some(w), Some(h)) if w.is_finite() && h.is_finite() && w >= 1.0 && h >= 1.0 => Ok((w, h)),
+        _ => Err("viewport needs {w, h} in points (at least 1) or {preset}".into()),
+    }
+}
+
+/// The action an `invoke` names (`None`: no such invoke).
+///
+/// - `press {x?, y?, target?}`: a press.
+/// - `hover {x?, y?, target?}`: a pointer move with no press, the hover
+///   a user gives a row to light its action bar.
+/// - `drag {target?, x?, y?, dx, dy}`: a press-drag-release.
+/// - `scroll {dx, dy, momentum?, x?, y?, target?}`: a trackpad gesture.
+fn invoke_action(name: &str, args: &serde_json::Value) -> Option<Result<Action, String>> {
+    let num = |key: &str| args.get(key).and_then(|v| v.as_f64());
+    let gesture = match name {
+        "press" => Gesture::Press,
+        "hover" => Gesture::Hover,
+        "drag" => Gesture::Drag {
+            dx: num("dx").unwrap_or(0.0),
+            dy: num("dy").unwrap_or(0.0),
+        },
+        "scroll" => Gesture::Scroll {
+            dx: num("dx").unwrap_or(0.0),
+            dy: num("dy").unwrap_or(0.0),
+            momentum: num("momentum").unwrap_or(0.0),
+        },
+        _ => return None,
+    };
+    let at = num("x").zip(num("y"));
+    let target = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    Some(Ok(Action {
+        target,
+        at,
+        gesture,
+        background: false,
+    }))
+}
+
+/// Steps `job` once; `Some` when it is done.
+///
+/// Before its input an action waits until its target is actionable: shown
+/// (in the window, not hidden, not clipped away; scrolled into view first
+/// when a scroll view has it out of sight), enabled, and the one the
+/// press reaches. It retries for [`ACTIONABLE_TRIES`] drains, so a screen
+/// still sliding in or an overlay fading out does not fail it, then fails
+/// with why: a press that would land elsewhere returns an error instead
+/// of reporting a press nothing received.
+fn step(
+    surface: &Rc<Surface>,
+    phase: &mut Phase,
+    action: Option<&Action>,
+) -> Option<Result<DispatchResult, String>> {
+    let Some(window) = surface.root().ns().window() else {
+        return Some(Err("the window is gone".into()));
+    };
+    let action = match (&mut *phase, action) {
+        (Phase::Settle(settle), _) => {
+            let settled = settle.poll(crate::model_activity(surface.key()), Instant::now())?;
+            if !settled {
+                log::info!("gpui-agent: the app did not settle; replying all the same");
+            }
+            return Some(Ok(settle.result(settled, Some(&window))));
+        }
+        (_, Some(action)) => action,
+        (_, None) => return Some(Err("nothing to act on".into())),
+    };
+    let target = action.target.as_deref().unwrap_or("the window");
+    match &mut *phase {
+        Phase::Locate { tries, revealed } => {
+            let (scope, (x, y)) = match locate(surface, &window, action) {
+                Ok(at) => at,
+                Err(Unready::Offscreen(scope, view)) if !*revealed => {
+                    *revealed = true;
+                    reveal(&scope, &view);
+                    return None;
+                }
+                Err(unready) => {
+                    *tries += 1;
+                    return (*tries >= ACTIONABLE_TRIES).then(|| Err(unready.error(target)));
+                }
+            };
+            if action.gesture.activates() && !action.background {
+                activate(&window);
+            }
+            perform(&scope, &window, &action.gesture, x, y);
+            *phase = if action.gesture.types() {
+                // The press is in the event queue: the run loop handles it
+                // before the next drain.
+                Phase::Focus { tries: 0 }
+            } else {
+                Phase::Settle(Settle::new(SETTLE, Reply::Action))
+            };
+            None
+        }
+        Phase::Focus { tries } => {
+            let focused = action
+                .target
+                .as_deref()
+                .and_then(|t| resolve(surface, t))
+                .is_some_and(|(_, view)| focused_in(&view, &window));
+            if !focused {
+                *tries += 1;
+                return (*tries >= FOCUS_TRIES).then(|| {
+                    Err(format!(
+                        "focus_missed: the press on {target} did not focus it"
+                    ))
+                });
+            }
+            match &action.gesture {
+                Gesture::Type(text) => crate::synth::type_text(surface, &window, text),
+                Gesture::SetValue(value) => {
+                    crate::synth::key(surface, &window, "cmd+a");
+                    crate::synth::type_text(surface, &window, value);
+                }
+                Gesture::Key(key) => crate::synth::key(surface, &window, key),
+                _ => {}
+            }
+            *phase = Phase::Settle(Settle::new(SETTLE, Reply::Action));
+            None
+        }
+        Phase::Settle(_) => None,
+    }
+}
+
+// --- Actionability ----------------------------------------------------------
+
+/// Why a target cannot take an action yet.
+enum Unready {
+    /// No node of the snapshot has this id or name.
+    Gone,
+    /// Hidden, empty, or clipped away by an ancestor that does not scroll.
+    NotVisible,
+    /// Out of a scroll view's viewport, still after scrolling it in: the
+    /// view, and its surface.
+    Offscreen(Rc<Scope>, NshView),
+    /// It, or an ancestor, is disabled.
+    Disabled,
+    /// The press would land on another view: this one.
+    Occluded(String),
+}
+
+impl Unready {
+    /// The error a client branches on: a code, a colon, the details.
+    fn error(&self, target: &str) -> String {
+        match self {
+            Unready::Gone => format!("target_gone: {target}"),
+            Unready::NotVisible => {
+                format!("not_visible: {target} is hidden, empty or clipped away")
+            }
+            Unready::Offscreen(..) => {
+                format!("offscreen: {target} is out of its scroll view's viewport")
+            }
+            Unready::Disabled => format!("disabled: {target}"),
+            Unready::Occluded(by) => {
+                format!("occluded_by: {by} (a press on {target} lands there)")
+            }
+        }
+    }
+}
+
+/// Where `view` can be seen ([`visibility`]).
+enum Visibility {
+    /// This part of it shows (window content points, from the top left).
+    Shown(Bounds<Points>),
+    /// A scroll view has it out of its viewport: scrolling brings it in.
+    Offscreen,
+    /// Hidden, empty, or clipped away where scrolling does not help.
+    Hidden,
+}
+
+impl Visibility {
+    /// The snapshot's `visible`: it shows, or would once scrolled to.
+    fn visible(&self) -> bool {
+        !matches!(self, Visibility::Hidden)
+    }
+
+    /// The snapshot's `in_viewport`: some of it shows now.
+    fn in_viewport(&self) -> bool {
+        matches!(self, Visibility::Shown(_))
+    }
+}
+
+/// Where `view` of `scope` can be seen: where it shows in its surface,
+/// and in an embedded surface as much of that as its host shows
+/// ([`clip_to_host`]).
+fn visibility(scope: &Scope, view: &NshView, window: &NSWindow) -> Visibility {
+    let own = visibility_in(&scope.surface, view, window);
+    let Some((host, outer)) = &scope.host else {
+        return own;
+    };
+    let scrolls = std::iter::successors(Some(host.clone()), NshView::parent_view)
+        .any(|v| v.kind() == ViewKind::Scroll);
+    clip_to_host(own, visibility(outer, host, window), scrolls)
+}
+
+/// What of an embedded view shows (`own`, in its surface) once its host's
+/// visibility (`host`) clips it: nothing where the host is hidden; out of
+/// sight where either is scrolled away, or where they meet nowhere and a
+/// scroll view around the host (`scrolls`) can bring it in.
+fn clip_to_host(own: Visibility, host: Visibility, scrolls: bool) -> Visibility {
+    match (own, host) {
+        (Visibility::Hidden, _) | (_, Visibility::Hidden) => Visibility::Hidden,
+        (Visibility::Shown(a), Visibility::Shown(b)) => match intersect(a, b) {
+            Some(part) => Visibility::Shown(part),
+            None if scrolls => Visibility::Offscreen,
+            None => Visibility::Hidden,
+        },
+        _ => Visibility::Offscreen,
+    }
+}
+
+/// What `a` and `b` share, if it has an area.
+fn intersect(a: Bounds<Points>, b: Bounds<Points>) -> Option<Bounds<Points>> {
+    let x0 = a.origin.x.0.max(b.origin.x.0);
+    let y0 = a.origin.y.0.max(b.origin.y.0);
+    let x1 = (a.origin.x.0 + a.size.width.0).min(b.origin.x.0 + b.size.width.0);
+    let y1 = (a.origin.y.0 + a.size.height.0).min(b.origin.y.0 + b.size.height.0);
+    (x1 > x0 && y1 > y0).then(|| {
+        Bounds::new(
+            Point::new(Points(x0), Points(y0)),
+            Size::new(Points(x1 - x0), Points(y1 - y0)),
+        )
+    })
+}
+
+/// Scrolls `view` of `scope` into sight: in its surface, then its host in
+/// the surface around, out to the window's.
+fn reveal(scope: &Scope, view: &NshView) {
+    nsh_platform_macos::scroll::reveal(&scope.surface, view);
+    if let Some((host, outer)) = &scope.host {
+        reveal(outer, host);
+    }
+}
+
+/// Where `view` can be seen in its surface: not hidden up its chain, with
+/// an area, and left of it by every clipping ancestor (scroll views at
+/// their current offset) and the window's content.
+fn visibility_in(surface: &Surface, view: &NshView, window: &NSWindow) -> Visibility {
+    let chain = || std::iter::successors(Some(view.clone()), NshView::parent_view);
+    let size = view.ns().frame().size;
+    if size.width <= 0.0 || size.height <= 0.0 || chain().any(|v| v.style_hidden()) {
+        return Visibility::Hidden;
+    }
+    let cut = || {
+        if chain().skip(1).any(|v| v.kind() == ViewKind::Scroll) {
+            Visibility::Offscreen
+        } else {
+            Visibility::Hidden
+        }
+    };
+    // A root (an embedded surface's node) clips nothing of itself: its
+    // host clips it ([`clip_to_host`]).
+    let part = if *view == surface.root() {
+        Some(view.ns().bounds())
+    } else {
+        shown_part(view)
+    };
+    let Some(part) = part else {
+        return cut();
+    };
+    let Some(part) = in_window(surface.root().ns(), part, window) else {
+        return Visibility::Hidden;
+    };
+    let Some(content) = window.contentView().map(|v| v.frame().size) else {
+        return Visibility::Hidden;
+    };
+    match within(part, content.width as f32, content.height as f32) {
+        Some(part) => Visibility::Shown(part),
+        None => cut(),
+    }
+}
+
+/// What of `rect` lies in a `width` × `height` window content, if it has
+/// an area.
+fn within(rect: Bounds<Points>, width: f32, height: f32) -> Option<Bounds<Points>> {
+    let x0 = rect.origin.x.0.max(0.0);
+    let y0 = rect.origin.y.0.max(0.0);
+    let x1 = (rect.origin.x.0 + rect.size.width.0).min(width);
+    let y1 = (rect.origin.y.0 + rect.size.height.0).min(height);
+    (x1 > x0 && y1 > y0).then(|| {
+        Bounds::new(
+            Point::new(Points(x0), Points(y0)),
+            Size::new(Points(x1 - x0), Points(y1 - y0)),
+        )
+    })
+}
+
+/// The point `action` acts at, once its target is actionable, and the
+/// surface of its target (the window's without one).
+fn locate(
+    surface: &Rc<Surface>,
+    window: &NSWindow,
+    action: &Action,
+) -> Result<(Rc<Scope>, (f64, f64)), Unready> {
+    if let Some(at) = action.at {
+        return Ok((Scope::top(surface), at));
+    }
+    let Some(target) = &action.target else {
+        let b = surface.root().ns().bounds();
+        return Ok((
+            Scope::top(surface),
+            (b.size.width / 2.0, b.size.height / 2.0),
+        ));
+    };
+    let (scope, view) = resolve(surface, target).ok_or(Unready::Gone)?;
+    let at = actionable(&scope, window, &view)?;
+    Ok((scope, at))
+}
+
+/// The point to press `view` at — the middle of its shown part — when it
+/// is shown, enabled and the press reaches it there.
+fn actionable(scope: &Rc<Scope>, window: &NSWindow, view: &NshView) -> Result<(f64, f64), Unready> {
+    let part = match visibility(scope, view, window) {
+        Visibility::Shown(part) => part,
+        Visibility::Offscreen => return Err(Unready::Offscreen(scope.clone(), view.clone())),
+        Visibility::Hidden => return Err(Unready::NotVisible),
+    };
+    if disabled(scope, view) {
+        return Err(Unready::Disabled);
+    }
+    let (x, y) = (
+        f64::from(part.origin.x.0 + part.size.width.0 / 2.0),
+        f64::from(part.origin.y.0 + part.size.height.0 / 2.0),
+    );
+    match receiver(window, x, y) {
+        Receiver::View(ns) if ns.isDescendantOf(view.ns()) => Ok((x, y)),
+        Receiver::View(ns) => Err(Unready::Occluded(owner(&ns))),
+        Receiver::Nothing => Err(Unready::Occluded("nothing that takes the pointer".into())),
+    }
+}
+
+/// `view` or an ancestor is disabled, in its surface or, for an embedded
+/// one, its host's.
+fn disabled(scope: &Scope, view: &NshView) -> bool {
+    std::iter::successors(Some(view.clone()), NshView::parent_view).any(|v| spec_of(&v).disabled)
+        || scope
+            .host
+            .as_ref()
+            .is_some_and(|(host, outer)| disabled(outer, host))
+}
+
+/// What a press at a point reaches.
+enum Receiver {
+    /// The view it lands on: one of nsh's or a hosted AppKit view.
+    View(objc2::rc::Retained<NSView>),
+    Nothing,
+}
+
+/// What a press at `(x, y)` (content points from the top left) lands
+/// on, as the window delivers it: AppKit's hit test of the content view,
+/// and over a surface's root nsh's own picking (`pointerEvents`,
+/// transforms, views animating out), which the root's `hitTest:` hands
+/// the press to. The hit test goes through a hosted view into the root of
+/// a surface it embeds: that surface picks.
+fn receiver(window: &NSWindow, x: f64, y: f64) -> Receiver {
+    let Some(content) = window.contentView() else {
+        return Receiver::Nothing;
+    };
+    let p = synth::to_window(window, x, y);
+    let in_super = match nsh_platform_macos::view::superview(&content) {
+        Some(frame) => frame.convertPoint_fromView(p, None),
+        None => p,
+    };
+    let Some(hit) = content.hitTest(in_super) else {
+        return Receiver::Nothing;
+    };
+    let Some(surface) = NshView::from_ns(&hit).and_then(|v| v.surface()) else {
+        return Receiver::View(hit);
+    };
+    let Some(root) = nsh_platform_macos::window::root_in(&surface, window) else {
+        return Receiver::Nothing;
+    };
+    let r = root.ns().convertPoint_fromView(p, None);
+    match nsh_platform_macos::input::view_at(&root, r.x as f32, r.y as f32) {
+        Some(view) => Receiver::View(view.ns().retain()),
+        None => Receiver::Nothing,
+    }
+}
+
+/// Names the view a press landed on: the nsh view it is or is hosted by,
+/// else its AppKit class.
+fn owner(ns: &NSView) -> String {
+    let mut current = Some(ns.retain());
+    while let Some(v) = current {
+        if let Some(view) = NshView::from_ns(&v) {
+            return describe(&view);
+        }
+        current = nsh_platform_macos::view::superview(&v);
+    }
+    format!("a {}", ns.class().name().to_string_lossy())
+}
+
+// --- Input ------------------------------------------------------------------
+
+/// `rect` of view `ns` in the window's content, from its top left; `None`
+/// when the view is not in the window or hidden. Same maths as the `nsh
+/// test` agent's (`crate::agent`).
+fn in_window(ns: &NSView, rect: NSRect, window: &NSWindow) -> Option<Bounds<Points>> {
+    if ns.window().is_none() || ns.isHiddenOrHasHiddenAncestor() {
+        return None;
+    }
+    let rect = ns.convertRect_toView(rect, None);
+    let height = window.contentView()?.frame().size.height;
+    Some(Bounds::new(
+        Point::new(
+            Points(rect.origin.x as f32),
+            Points((height - rect.origin.y - rect.size.height) as f32),
+        ),
+        Size::new(
+            Points(rect.size.width as f32),
+            Points(rect.size.height as f32),
+        ),
+    ))
+}
+
+/// Makes the app active, as `crate::agent::MacNative::activate` does.
+fn activate(window: &NSWindow) {
+    let app = objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(window));
+    if !app.isActive() {
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+    }
+}
+
+fn with_window(surface: &Rc<Surface>, f: impl FnOnce(&NSWindow)) -> Result<DispatchResult, String> {
+    let Some(window) = surface.root().ns().window() else {
+        return Err("the window is gone".into());
+    };
+    f(&window);
+    Ok(DispatchResult::empty())
+}
+
+/// `view` or a descendant of it is the responder.
+fn focused_in(view: &NshView, window: &NSWindow) -> bool {
+    window
+        .firstResponder()
+        .and_then(|r| r.downcast::<NSView>().ok())
+        .is_some_and(|v| v.isDescendantOf(view.ns()))
+}
+
+/// Gives `gesture`'s pointer input at `(x, y)`, content points from the
+/// top left. `scope` is the target's surface.
+fn perform(scope: &Scope, window: &NSWindow, gesture: &Gesture, x: f64, y: f64) {
+    match *gesture {
+        Gesture::Press | Gesture::Type(_) | Gesture::SetValue(_) | Gesture::Key(_) => {
+            crate::synth::mouse(window, NSEventType::MouseMoved, x, y, 0);
+            crate::synth::mouse(window, NSEventType::LeftMouseDown, x, y, 1);
+            crate::synth::mouse(window, NSEventType::LeftMouseUp, x, y, 1);
+        }
+        Gesture::Hover => hover(scope, window, x, y),
+        Gesture::Drag { dx, dy } => drag(window, x, y, dx, dy),
+        Gesture::Scroll { dx, dy, momentum } => scroll(window, x, y, dx, dy, momentum),
+    }
+}
+
+/// A user's drag: hover, down, a run of dragged steps to `(dx, dy)` away
+/// (pan gestures need a travel, not one jump), up at the end.
+fn drag(window: &NSWindow, x0: f64, y0: f64, dx: f64, dy: f64) {
+    crate::synth::mouse(window, NSEventType::MouseMoved, x0, y0, 0);
+    crate::synth::mouse(window, NSEventType::LeftMouseDown, x0, y0, 1);
+    const STEPS: usize = 6;
+    for i in 1..=STEPS {
+        let t = i as f64 / STEPS as f64;
+        crate::synth::mouse(
+            window,
+            NSEventType::LeftMouseDragged,
+            x0 + dx * t,
+            y0 + dy * t,
+            1,
+        );
+    }
+    crate::synth::mouse(window, NSEventType::LeftMouseUp, x0 + dx, y0 + dy, 1);
+}
+
+/// A pointer move with no press, over the target's surface and the ones
+/// it is embedded in, from the window's: each surface's root tracks the
+/// pointer itself.
+fn hover(scope: &Scope, window: &NSWindow, x: f64, y: f64) {
+    // `postEvent` drops `MouseMoved` when the window's
+    // `acceptsMouseMovedEvents` is off (tracking areas opt real moves in,
+    // not posted ones): dispatch it through the input path itself.
+    if let Some(event) = crate::synth::mouse_event(
+        window,
+        NSEventType::MouseMoved,
+        x,
+        y,
+        0,
+        NSEventModifierFlags::empty(),
+    ) {
+        for surface in scope.surfaces() {
+            nsh_platform_macos::input::event(&surface, &event);
+        }
+    }
+}
+
+/// A trackpad scroll gesture of `(dx, dy)` points at `(x, y)`: began, a
+/// run of changed deltas a gesture apart, ended — the same shape
+/// `agent::scroll` feeds the headless driver. `momentum`: that many more
+/// points as the system's coasting momentum (phase events a trackpad
+/// sends after the gesture ends), left running — no end — so a press can
+/// be checked against a live glide. It runs along the gesture's axis, or
+/// vertically on its own.
+fn scroll(window: &NSWindow, x: f64, y: f64, dx: f64, dy: f64, momentum: f64) {
+    const STEP: f64 = 24.0;
+    let gesture = dx != 0.0 || dy != 0.0;
+    let frames = ((dx.abs().max(dy.abs()) / STEP).ceil() as u32).max(1);
+    if gesture {
+        synth::wheel_with(window, x, y, 0, 0, Some(1), 0, synth::timestamp());
+    }
+    let (mut sent_x, mut sent_y) = (0i32, 0i32);
+    for i in 1..=frames {
+        let t = i as f64 / f64::from(frames);
+        let (to_x, to_y) = ((dx * t).round() as i32, (dy * t).round() as i32);
+        if !gesture || (to_x == sent_x && to_y == sent_y) {
+            continue;
+        }
+        synth::wheel_with(
+            window,
+            x,
+            y,
+            to_x - sent_x,
+            to_y - sent_y,
+            Some(2),
+            0,
+            synth::timestamp(),
+        );
+        (sent_x, sent_y) = (to_x, to_y);
+    }
+    if gesture {
+        synth::wheel_with(window, x, y, 0, 0, Some(4), 0, synth::timestamp());
+    }
+    if momentum != 0.0 {
+        // `dx=dy=0` continues momentum already running (changed deltas
+        // only, as the system sends until it decays).
+        if gesture {
+            synth::wheel_with(window, x, y, 0, 0, None, 1, synth::timestamp());
+        }
+        let horizontal = dx != 0.0 && dy == 0.0;
+        let frames = ((momentum.abs() / STEP).ceil() as u32).max(1);
+        let (mut sent_x, mut sent_y) = (0i32, 0i32);
+        for i in 1..=frames {
+            let t = i as f64 / f64::from(frames);
+            let v = (momentum * t).round() as i32;
+            let (to_x, to_y) = if horizontal { (v, 0) } else { (0, v) };
+            synth::wheel_with(
+                window,
+                x,
+                y,
+                to_x - sent_x,
+                to_y - sent_y,
+                None,
+                2,
+                synth::timestamp(),
+            );
+            (sent_x, sent_y) = (to_x, to_y);
+        }
+    }
+}
+
+// --- Key bindings -----------------------------------------------------------
+
+/// A key binding of the app, and how to fire it.
+struct Binding {
+    info: KeybindingInfo,
+    fire: Fire,
+}
+
+enum Fire {
+    /// Keys, as [`synth::key`] names them: a binding of the app's keymap.
+    Keys(String),
+    /// The menu item at this index path of the main menu.
+    Menu(Vec<isize>),
+}
+
+/// The app's key bindings: its keymap's (`nsh/keymap`; focused scope,
+/// they fire in its window), then its menus' key equivalents (global
+/// scope, the application's). Keymap ids are `keymap.<chord>`, menu ids
+/// `menu.<title>/<title>`. Menu items that close, quit or delete are
+/// dangerous: firing them needs `confirm`.
+fn catalog(surface: &Surface) -> Vec<Binding> {
+    let mut out: Vec<Binding> = Vec::new();
+    // The newest binding of a keystroke is the one that fires.
+    for binding in nsh_platform_macos::keymap::bindings(surface).iter().rev() {
+        let chord = chord_of(&binding.keystroke);
+        let id = format!("keymap.{chord}");
+        if out.iter().any(|b| b.info.id == id) {
+            continue;
+        }
+        let mut info = KeybindingInfo::new(id, chord, KeybindingScope::Focused, false);
+        info.dangerous = binding_is_dangerous(&info);
+        out.push(Binding {
+            info,
+            fire: Fire::Keys(keystroke_name(&binding.keystroke)),
+        });
+    }
+    out.reverse();
+    let app = objc2_app_kit::NSApplication::sharedApplication(
+        MainThreadMarker::new().expect("the agent runs on the main thread"),
+    );
+    if let Some(menu) = app.mainMenu() {
+        menu_bindings(&menu, "menu.", &mut Vec::new(), &mut out);
+    }
+    out
+}
+
+/// Adds the key equivalents of `menu` and its submenus (paths `path`) to
+/// `out`. The app menu's title is the app's name: it is named `app`.
+fn menu_bindings(
+    menu: &objc2_app_kit::NSMenu,
+    prefix: &str,
+    path: &mut Vec<isize>,
+    out: &mut Vec<Binding>,
+) {
+    for index in 0..menu.numberOfItems() {
+        let Some(item) = menu.itemAtIndex(index) else {
+            continue;
+        };
+        if item.isSeparatorItem() || item.isHidden() {
+            continue;
+        }
+        let title = if prefix == "menu." && index == 0 {
+            "app".to_owned()
+        } else {
+            item.title().to_string()
+        };
+        path.push(index);
+        if let Some(submenu) = item.submenu() {
+            menu_bindings(&submenu, &format!("{prefix}{title}/"), path, out);
+        } else if let Some(chord) = menu_chord(
+            &item.keyEquivalent().to_string(),
+            item.keyEquivalentModifierMask(),
+        ) {
+            let dangerous = dangerous_menu_item(&title, item.action());
+            let mut info = KeybindingInfo::new(
+                format!("{prefix}{title}"),
+                chord,
+                KeybindingScope::Global,
+                dangerous,
+            );
+            info.dangerous = binding_is_dangerous(&info);
+            out.push(Binding {
+                info,
+                fire: Fire::Menu(path.clone()),
+            });
+        }
+        path.pop();
+    }
+}
+
+/// A menu item that ends something the user may want back: closing a
+/// window or the app, deleting. Its role's action says so, or for the
+/// app's own items (which carry no role) its title.
+fn dangerous_menu_item(title: &str, action: Option<objc2::runtime::Sel>) -> bool {
+    use objc2::sel;
+    let by_action =
+        action.is_some_and(|a| [sel!(terminate:), sel!(performClose:), sel!(delete:)].contains(&a));
+    let words = [
+        "quit", "close", "delete", "remove", "discard", "erase", "sign out", "log out",
+    ];
+    let title = title.to_lowercase();
+    by_action || words.iter().any(|w| title.starts_with(w))
+}
+
+/// `stroke` as a chord, as gpui-agent writes them: `cmd-shift-k`.
+fn chord_of(stroke: &nsh_core::keymap::Keystroke) -> String {
+    let m = stroke.modifiers;
+    let mut chord = String::new();
+    let mut prefix = 0;
+    for (on, name, written) in [
+        (m.ctrl, "ctrl-", "ctrl+"),
+        (m.alt, "alt-", "alt+"),
+        (m.shift, "shift-", "shift+"),
+        (m.cmd, "cmd-", "cmd+"),
+    ] {
+        if on {
+            chord.push_str(name);
+            prefix += written.len();
+        }
+    }
+    // The key as the keystroke's canonical text names it, after its
+    // modifiers (`ctrl+alt+shift+cmd+<key>`).
+    chord.push_str(&stroke.to_string()[prefix..]);
+    chord
+}
+
+/// A menu item's key equivalent as a chord (`None`: it has none). An
+/// upper-case letter is typed with Shift.
+fn menu_chord(key: &str, mask: NSEventModifierFlags) -> Option<String> {
+    let mut chars = key.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    let shift = mask.contains(NSEventModifierFlags::Shift) || c.is_uppercase();
+    let name = match c {
+        '\r' => "enter".to_owned(),
+        '\u{1b}' => "escape".to_owned(),
+        '\t' => "tab".to_owned(),
+        '\u{8}' | '\u{7f}' => "backspace".to_owned(),
+        ' ' => "space".to_owned(),
+        '\u{f700}' => "up".to_owned(),
+        '\u{f701}' => "down".to_owned(),
+        '\u{f702}' => "left".to_owned(),
+        '\u{f703}' => "right".to_owned(),
+        '\u{f704}'..='\u{f71b}' => format!("f{}", c as u32 - 0xf703),
+        '\u{f728}' => "delete".to_owned(),
+        c => c.to_lowercase().to_string(),
+    };
+    let mut chord = String::new();
+    for (on, prefix) in [
+        (mask.contains(NSEventModifierFlags::Control), "ctrl-"),
+        (mask.contains(NSEventModifierFlags::Option), "alt-"),
+        (shift, "shift-"),
+        (mask.contains(NSEventModifierFlags::Command), "cmd-"),
+    ] {
+        if on {
+            chord.push_str(prefix);
+        }
+    }
+    chord.push_str(&name);
+    Some(chord)
+}
+
+/// `keybinding`: fires a binding of [`catalog`] by id (or, as clients
+/// used to, by its chord), after gpui-agent's gate: the scope must be
+/// the binding's, a focused binding needs the app focused (or
+/// `activate`), and a dangerous one `confirm`.
+fn keybinding(surface: &Rc<Surface>, request: KeybindingRequest<'_>) -> Result<(), String> {
+    let window = surface.root().ns().window().ok_or("the window is gone")?;
+    let catalog = catalog(surface);
+    let infos: Vec<KeybindingInfo> = catalog.iter().map(|b| b.info.clone()).collect();
+    let wanted = chord_text(request.binding);
+    let by_chord = (!infos.iter().any(|i| i.id == request.binding))
+        .then(|| infos.iter().find(|i| chord_text(&i.chord) == wanted))
+        .flatten();
+    let request = KeybindingRequest {
+        binding: by_chord.map_or(request.binding, |info| &info.id),
+        ..request
+    };
+    let app = objc2_app_kit::NSApplication::sharedApplication(
+        MainThreadMarker::new().expect("the agent runs on the main thread"),
+    );
+    let focused = app.isActive() && window.isKeyWindow();
+    let info = authorize_keybinding(&infos, request, focused)?;
+    let Some(binding) = catalog.iter().find(|b| b.info.id == info.id) else {
+        return Err(format!("unknown binding `{}`", info.id));
+    };
+    if request.activate {
+        activate(&window);
+        window.makeKeyAndOrderFront(None);
+    }
+    match &binding.fire {
+        Fire::Keys(keys) => crate::synth::key(surface, &window, keys),
+        Fire::Menu(path) => {
+            let mut menu = app.mainMenu().ok_or("the app has no menu")?;
+            let (last, parents) = path.split_last().ok_or("an empty menu path")?;
+            for &index in parents {
+                menu = menu
+                    .itemAtIndex(index)
+                    .and_then(|item| item.submenu())
+                    .ok_or("the menu changed")?;
+            }
+            // AppKit enables items as it validates them: as when the user
+            // opens the menu.
+            menu.update();
+            let enabled = menu.itemAtIndex(*last).is_some_and(|item| item.isEnabled());
+            if !enabled {
+                return Err(gpui_agent::keybinding::keybinding_unavailable(format!(
+                    "{} is disabled",
+                    info.id
+                )));
+            }
+            menu.performActionForItemAtIndex(*last);
+        }
+    }
+    Ok(())
+}
+
+/// A chord's text to compare: lower case, its modifiers in one order
+/// whatever their spelling, `-` between them.
+fn chord_text(chord: &str) -> String {
+    let lower = chord.trim().to_lowercase();
+    // A trailing `+` or `-` after a separator is the key itself (`cmd++`).
+    let (body, key) = match lower.char_indices().last() {
+        Some((i, c)) if i > 0 && (c == '+' || c == '-') => (&lower[..i - 1], c.to_string()),
+        _ => match lower.rfind(['+', '-', ' ']) {
+            Some(i) => (&lower[..i], lower[i + 1..].to_owned()),
+            None => ("", lower.clone()),
+        },
+    };
+    let mods: Vec<&str> = body
+        .split(['+', '-', ' '])
+        .map(|m| match m {
+            "command" | "super" | "meta" => "cmd",
+            "control" => "ctrl",
+            "option" | "opt" => "alt",
+            m => m,
+        })
+        .collect();
+    let mut text = String::new();
+    for m in ["ctrl", "alt", "shift", "cmd"] {
+        if mods.contains(&m) {
+            text.push_str(m);
+            text.push('-');
+        }
+    }
+    text.push_str(&key);
+    text
+}
+
+fn screenshot(
+    surface: &Rc<Surface>,
+    path: Option<&str>,
+    mode: gpui_agent::protocol::ScreenshotMode,
+) -> Result<DispatchResult, String> {
+    if mode.is_scrolled() {
+        return Err(gpui_agent::scroll_capture::scroll_unavailable(
+            "scrolled capture is not implemented on this host",
+        ));
+    }
+    let Some(path) = path else {
+        return Err("screenshot needs a path".into());
+    };
+    let Some(window) = surface.root().ns().window() else {
+        return Err("the window is gone".into());
+    };
+    let png = synth::shot(&window)?;
+    std::fs::write(path, &png).map_err(|e| format!("cannot write {path}: {e}"))?;
+    Ok(DispatchResult::json(serde_json::json!({ "path": path })))
+}
+
+fn assert_spec(surface: &Rc<Surface>, spec: &AssertSpec) -> Result<DispatchResult, String> {
+    let Some(window) = surface.root().ns().window() else {
+        return Err("the window is gone".into());
+    };
+    let found = find(surface, &spec.target);
+    if spec.exists == Some(false) {
+        return if found.is_none() {
+            Ok(DispatchResult::empty())
+        } else {
+            Err(format!("assert failed: '{}' exists", spec.target))
+        };
+    }
+    let Some(Found {
+        scope, view, node, ..
+    }) = found
+    else {
+        return Err(format!("assert failed: '{}' not found", spec.target));
+    };
+    assert_node(spec, &node)?;
+    if let Some(want) = spec.in_viewport {
+        let has = visibility(&scope, &view, &window).in_viewport();
+        if has != want {
+            return Err(format!(
+                "assert failed: '{}' in_viewport mismatch",
+                spec.target
+            ));
+        }
+    }
+    Ok(DispatchResult::empty())
+}
+
+/// `assert`'s checks of what `node` says. A masked input's value is its
+/// bullets ([`mask`]), so asserting its text fails, and the failure names
+/// neither the value nor the text asked for: an assert is no way to
+/// guess a password.
+fn assert_node(spec: &AssertSpec, node: &UiNode) -> Result<(), String> {
+    let masked = node.states.iter().any(|state| state == "masked");
+    for (field, want, got) in [
+        ("name", spec.name.as_deref(), Some(node.name.as_str())),
+        ("role", spec.role.as_deref(), Some(node.role.as_str())),
+        ("value", spec.value.as_deref(), node.value.as_deref()),
+    ] {
+        if let Some(want) = want
+            && got != Some(want)
+        {
+            if masked && field == "value" {
+                return Err(format!(
+                    "assert failed: '{}' value differs (a masked input's value is a bullet \
+                     per character)",
+                    spec.target
+                ));
+            }
+            return Err(format!(
+                "assert failed: '{}' {field} = {:?}, expected {want:?}",
+                spec.target,
+                got.unwrap_or("<none>")
+            ));
+        }
+    }
+    if let Some(want) = spec.checked
+        && node.checked != Some(want)
+    {
+        return Err(format!("assert failed: '{}' checked mismatch", spec.target));
+    }
+    if let Some(want) = spec.visible
+        && node.visible != want
+    {
+        return Err(format!("assert failed: '{}' visible mismatch", spec.target));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only the step that gives the input asks: a press moves the screen.
+    #[test]
+    fn the_press_waits_on_the_callers_word_and_nothing_after_it_does() {
+        let locating = Phase::Locate {
+            tries: 0,
+            revealed: false,
+        };
+        assert!(may_step(&locating, &|| true));
+        assert!(!may_step(&locating, &|| false));
+        assert!(may_step(&Phase::Focus { tries: 0 }, &|| false));
+        let settling = Phase::Settle(Settle::new(SETTLE, Reply::Action));
+        assert!(may_step(&settling, &|| false));
+    }
+
+    #[cfg(feature = "gpui-agent-server")]
+    #[test]
+    fn a_token_file_holds_the_token_and_an_empty_one_none() {
+        assert_eq!(token_in("abc123\n").as_deref(), Some("abc123"));
+        assert_eq!(token_in("  \n"), None);
+    }
+
+    #[test]
+    fn an_action_dropped_on_the_way_still_ends_and_says_so() {
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mine = heard.clone();
+        let run = AgentRun::start(Box::new(move |r| *mine.lock().unwrap() = Some(r)));
+        assert!(crate::provenance::agent_running());
+        drop(run);
+        assert!(!crate::provenance::agent_running());
+        assert_eq!(
+            *heard.lock().unwrap(),
+            Some(Err("the action stopped".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_finished_action_is_heard_once() {
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mine = heard.clone();
+        let run = AgentRun::start(Box::new(move |r| mine.lock().unwrap().push(r)));
+        run.finish(Ok(()));
+        assert!(!crate::provenance::agent_running());
+        assert_eq!(*heard.lock().unwrap(), [Ok(())]);
+    }
+
+    #[test]
+    fn an_invoke_with_a_point_acts_there_whatever_its_target() {
+        let args = serde_json::json!({"x": 10.0, "y": 20.0, "target": "row", "dx": 5.0});
+        let action = invoke_action("drag", &args).unwrap().unwrap();
+        assert_eq!(action.at, Some((10.0, 20.0)));
+        assert_eq!(action.target.as_deref(), Some("row"));
+        assert_eq!(action.gesture, Gesture::Drag { dx: 5.0, dy: 0.0 });
+        assert!(invoke_action("teleport", &args).is_none());
+    }
+
+    #[test]
+    fn only_typing_gestures_wait_for_the_focus() {
+        assert!(Gesture::Type("a".into()).types());
+        assert!(Gesture::Key("Return".into()).types());
+        assert!(!Gesture::Press.types());
+        assert!(!Gesture::Hover.types());
+    }
+
+    #[test]
+    fn only_what_reads_the_app_is_not_an_action() {
+        for op in [
+            Op::Hello,
+            Op::Revision,
+            Op::Keybindings,
+            Op::Wait {
+                timeout_ms: Some(1),
+            },
+        ] {
+            assert!(!acts(&op), "{op:?}");
+        }
+        assert!(acts(&Op::Shutdown));
+        assert!(acts(&Op::Invoke {
+            name: "press".into(),
+            args: serde_json::json!({}),
+        }));
+    }
+
+    #[cfg(feature = "gpui-agent-server")]
+    #[test]
+    fn the_channel_is_the_developers_unless_it_says_otherwise() {
+        assert!(channel_is_person(None));
+        assert!(channel_is_person(Some("person")));
+        assert!(!channel_is_person(Some("agent")));
+        // what it can't read is the agent's
+        assert!(!channel_is_person(Some("")));
+        assert!(!channel_is_person(Some("Person")));
+    }
+
+    #[test]
+    fn a_rect_is_cut_to_the_window_content() {
+        let rect = |x, y, w, h| {
+            Bounds::new(
+                Point::new(Points(x), Points(y)),
+                Size::new(Points(w), Points(h)),
+            )
+        };
+        assert_eq!(
+            within(rect(-10.0, 790.0, 50.0, 40.0), 400.0, 800.0),
+            Some(rect(0.0, 790.0, 40.0, 10.0))
+        );
+        assert_eq!(within(rect(0.0, 800.0, 50.0, 40.0), 400.0, 800.0), None);
+        assert_eq!(within(rect(10.0, 10.0, 0.0, 40.0), 400.0, 800.0), None);
+    }
+
+    #[test]
+    fn the_app_settles_after_quiet_drains_in_a_row() {
+        let now = Instant::now();
+        let mut settle = Settle::new(SETTLE, Reply::Action);
+        // The first look only learns the batch count.
+        assert_eq!(settle.poll((3, false), now), None);
+        for _ in 1..QUIET_DRAINS {
+            assert_eq!(settle.poll((3, false), now), None);
+        }
+        assert_eq!(settle.poll((3, false), now), Some(true));
+    }
+
+    #[test]
+    fn a_batch_or_an_animation_starts_the_quiet_over() {
+        let now = Instant::now();
+        let mut settle = Settle::new(SETTLE, Reply::Action);
+        for _ in 0..QUIET_DRAINS {
+            settle.poll((3, false), now);
+        }
+        assert_eq!(settle.poll((4, false), now), None);
+        assert_eq!(settle.poll((4, true), now), None);
+        assert_eq!(settle.quiet, 0);
+    }
+
+    #[test]
+    fn an_app_that_never_settles_gets_its_reply_at_the_deadline() {
+        let mut settle = Settle::new(Duration::from_millis(10), Reply::Action);
+        let later = Instant::now() + Duration::from_secs(1);
+        assert_eq!(settle.poll((1, true), later), Some(false));
+        assert_eq!(
+            settle.result(false, None).value,
+            Some(serde_json::json!({ "settled": false }))
+        );
+        assert_eq!(settle.result(true, None).value, None);
+        let wait = Settle::new(SETTLE, Reply::Settled);
+        assert_eq!(
+            wait.result(true, None).value,
+            Some(serde_json::json!({ "settled": true }))
+        );
+    }
+
+    #[test]
+    fn a_viewport_is_a_size_or_a_preset() {
+        use serde_json::json;
+        assert_eq!(
+            viewport_size(&json!({"w": 800, "h": 600}), 2.0),
+            Ok((800.0, 600.0))
+        );
+        assert_eq!(
+            viewport_size(&json!({"preset": "phone"}), 2.0),
+            Ok((390.0, 844.0))
+        );
+        assert!(
+            viewport_size(&json!({"preset": "watch"}), 2.0)
+                .unwrap_err()
+                .contains("phone, tablet, laptop, desktop")
+        );
+        assert!(viewport_size(&json!({"w": 0, "h": 600}), 2.0).is_err());
+        assert!(viewport_size(&json!({}), 2.0).is_err());
+    }
+
+    #[test]
+    fn a_viewport_cannot_change_the_backing_scale() {
+        let args = serde_json::json!({"preset": "phone", "scale": 3});
+        let err = viewport_size(&args, 2.0).unwrap_err();
+        assert!(err.starts_with("scale_unsupported: "), "{err}");
+        let same = serde_json::json!({"preset": "phone", "scale": 2});
+        assert_eq!(viewport_size(&same, 2.0), Ok((390.0, 844.0)));
+    }
+
+    #[test]
+    fn a_compact_tree_keeps_what_shows_and_can_be_operated_with_its_context() {
+        let at = |mut node: UiNode, y: f32| {
+            node.bounds = TreeBounds {
+                x: 0.0,
+                y,
+                w: 100.0,
+                h: 20.0,
+            };
+            node
+        };
+        let mut list = at(UiNode::new("chats", "list", "Chats"), 0.0);
+        list.children = vec![
+            at(UiNode::new("open", "button", "Open"), 10.0),
+            at(UiNode::new("n7", "text", "Yesterday"), 40.0),
+            at(UiNode::new("far", "button", "Far"), -400.0),
+        ];
+        let mut hidden = at(UiNode::new("gone", "button", "Gone"), 10.0);
+        hidden.visible = false;
+        let lone = at(UiNode::new("n9", "text", "Title"), 10.0);
+        let tree = compact(vec![list, hidden, lone], (400.0, 800.0));
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].id, "chats");
+        let kept: Vec<_> = tree[0].children.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(kept, ["open"]);
+    }
+
+    #[test]
+    fn equal_trees_have_equal_revisions() {
+        let tree = |name: &str| UiTree {
+            app: "app".into(),
+            platform: PlatformKind::Desktop,
+            ready: true,
+            nodes: vec![UiNode::new("save", "button", name)],
+            rev: None,
+        };
+        assert_eq!(revision(&tree("Save")), revision(&tree("Save")));
+        assert_ne!(revision(&tree("Save")), revision(&tree("Saved")));
+    }
+
+    #[test]
+    fn a_masked_input_never_shows_its_text() {
+        let secret = "hunter2é";
+        let input = |text: &str| {
+            let mut node = UiNode::new("password", "textfield", "Password");
+            node.bounds = TreeBounds {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 20.0,
+            };
+            // An app may mirror the text into the accessibility value.
+            node.value = Some(text.into());
+            node
+        };
+        let mut node = input(secret);
+        mask(&mut node, secret.chars().count());
+        assert_eq!(node.value.as_deref(), Some("••••••••"));
+        assert!(node.states.iter().any(|state| state == "masked"));
+
+        let tree = |node: UiNode| UiTree {
+            app: "app".into(),
+            platform: PlatformKind::Desktop,
+            ready: true,
+            nodes: vec![node],
+            rev: None,
+        };
+        let mut full = tree(node.clone());
+        full.rev = Some(revision(&full));
+        let json = serde_json::to_string(&full).unwrap();
+        assert!(!json.contains(secret), "{json}");
+        let mut short = tree(node.clone());
+        short.nodes = compact(short.nodes, (400.0, 800.0));
+        let lines = gpui_agent::compact_lines(&short);
+        assert!(lines.contains("password textfield") && !lines.contains(secret));
+        // Revisions and fingerprints depend on the length, not the text.
+        let mut other = input("password");
+        mask(&mut other, "password".len());
+        assert_eq!(
+            revision(&tree(other.clone())),
+            revision(&tree(node.clone()))
+        );
+        assert_eq!(other.fingerprint(None), node.fingerprint(None));
+
+        // Asserting the text fails without naming it or the value.
+        let spec = |value: &str| AssertSpec {
+            target: "password".into(),
+            value: Some(value.into()),
+            ..Default::default()
+        };
+        let err = assert_node(&spec(secret), &node).unwrap_err();
+        assert!(err.starts_with("assert failed: 'password' value"), "{err}");
+        assert!(!err.contains(secret) && !err.contains('•'), "{err}");
+        assert!(assert_node(&spec("••••••••"), &node).is_ok());
+        // An input that is not masked still reports what differs.
+        let err = assert_node(&spec("other"), &input(secret)).unwrap_err();
+        assert!(err.contains(secret), "{err}");
+
+        // `type` and `set_value` reply with nothing of what they typed.
+        let settle = Settle::new(SETTLE, Reply::Action);
+        for settled in [true, false] {
+            let reply = response("1", Ok(settle.result(settled, None)));
+            let reply = serde_json::to_string(&reply).unwrap();
+            assert!(!reply.contains(secret), "{reply}");
+        }
+    }
+
+    #[test]
+    fn keystrokes_are_chords_as_gpui_agent_writes_them() {
+        use nsh_core::{keymap::Keystroke, platform::Os};
+        let chord = |text| chord_of(&Keystroke::parse(text, Os::MacOs).unwrap());
+        assert_eq!(chord("cmd+shift+k"), "shift-cmd-k");
+        assert_eq!(chord("ctrl+f5"), "ctrl-f5");
+    }
+
+    #[test]
+    fn menu_key_equivalents_are_chords() {
+        let cmd = NSEventModifierFlags::Command;
+        assert_eq!(menu_chord("w", cmd).as_deref(), Some("cmd-w"));
+        assert_eq!(menu_chord("Z", cmd).as_deref(), Some("shift-cmd-z"));
+        assert_eq!(menu_chord("\u{f704}", cmd).as_deref(), Some("cmd-f1"));
+        assert_eq!(menu_chord("", cmd), None);
+    }
+
+    #[test]
+    fn chords_compare_whatever_their_separators() {
+        assert_eq!(chord_text("Cmd+Shift+K"), "shift-cmd-k");
+        assert_eq!(chord_text("command-shift-k"), "shift-cmd-k");
+        assert_eq!(chord_text("cmd++"), "cmd-+");
+        assert_eq!(chord_text("cmd--"), "cmd--");
+        assert_eq!(chord_text("escape"), "escape");
+    }
+
+    #[test]
+    fn closing_quitting_and_deleting_menu_items_are_dangerous() {
+        use objc2::sel;
+        assert!(dangerous_menu_item("Quit Rox", None));
+        assert!(dangerous_menu_item("Close Window", None));
+        assert!(dangerous_menu_item("Anything", Some(sel!(terminate:))));
+        assert!(!dangerous_menu_item("New Chat", Some(sel!(newDocument:))));
+    }
+
+    #[test]
+    fn a_dangerous_binding_needs_confirm() {
+        let catalog = [KeybindingInfo::new(
+            "menu.File/Close Window",
+            "cmd-w",
+            KeybindingScope::Global,
+            dangerous_menu_item("Close Window", None),
+        )];
+        let request = |confirm| KeybindingRequest {
+            binding: "menu.File/Close Window",
+            chord: None,
+            scope: KeybindingScope::Global,
+            confirm,
+            activate: false,
+        };
+        assert!(authorize_keybinding(&catalog, request(false), true).is_err());
+        assert!(authorize_keybinding(&catalog, request(true), true).is_ok());
+    }
+
+    #[test]
+    fn a_node_scrolled_out_is_visible_but_not_in_the_viewport() {
+        let shown = Visibility::Shown(Bounds::new(
+            Point::new(Points(0.0), Points(0.0)),
+            Size::new(Points(10.0), Points(10.0)),
+        ));
+        assert!(shown.visible() && shown.in_viewport());
+        assert!(Visibility::Offscreen.visible() && !Visibility::Offscreen.in_viewport());
+        assert!(!Visibility::Hidden.visible() && !Visibility::Hidden.in_viewport());
+    }
+
+    #[test]
+    fn unready_targets_fail_with_a_code_first() {
+        assert_eq!(Unready::Gone.error("save"), "target_gone: save");
+        assert!(
+            Unready::NotVisible
+                .error("save")
+                .starts_with("not_visible: save")
+        );
+        assert_eq!(Unready::Disabled.error("save"), "disabled: save");
+        let occluded = Unready::Occluded("n42 \"FPS\"".into()).error("close");
+        assert!(
+            occluded.starts_with("occluded_by: n42 \"FPS\""),
+            "{occluded}"
+        );
+    }
+
+    #[test]
+    fn embedded_ids_carry_the_keys_of_their_surfaces() {
+        assert_eq!(surface_id("", 7), "s7");
+        assert_eq!(prefix_of_keys([]), "");
+        assert_eq!(prefix_of_keys([7]), "s7:");
+        assert_eq!(prefix_of_keys([7, 9]), "s7:s9:");
+        // A view's prefix (up its views) is the one its scope gave its
+        // surface (down from the window).
+        let outer = prefix_of_keys([7]);
+        assert_eq!(surface_id(&outer, 9) + ":", prefix_of_keys([7, 9]));
+    }
+
+    #[test]
+    fn an_embedded_surface_is_a_node_holding_its_app_in_the_hosts_tree() {
+        let at = |mut node: UiNode, y: f32| {
+            node.bounds = TreeBounds {
+                x: 0.0,
+                y,
+                w: 100.0,
+                h: 20.0,
+            };
+            node
+        };
+        // The host's own `n3`, and the mini app's `n3` in surface 7, whose
+        // own card embeds surface 9.
+        let inner = surface_node(
+            "s7:s9",
+            String::new(),
+            vec![at(UiNode::new("s7:s9:save", "button", "Save"), 60.0)],
+        );
+        let card = at(
+            surface_node(
+                "s7",
+                "Weather".into(),
+                vec![
+                    at(UiNode::new("s7:n3", "button", "Refresh"), 20.0),
+                    at(UiNode::new("s7:n4", "text", "21°"), 40.0),
+                    at(inner, 60.0),
+                ],
+            ),
+            20.0,
+        );
+        let mut chat = at(UiNode::new("chat", "list", "Chat"), 0.0);
+        chat.children = vec![at(UiNode::new("n3", "button", "Send"), 0.0), card];
+
+        fn ids<'a>(nodes: &'a [UiNode], out: &mut Vec<&'a str>) {
+            for node in nodes {
+                out.push(&node.id);
+                ids(&node.children, out);
+            }
+        }
+        let nodes = vec![chat];
+        let mut all = Vec::new();
+        ids(&nodes, &mut all);
+        let unique: std::collections::HashSet<_> = all.iter().collect();
+        assert_eq!(unique.len(), all.len(), "{all:?}");
+
+        let tree = UiTree {
+            app: "app".into(),
+            platform: PlatformKind::Desktop,
+            ready: true,
+            nodes: compact(nodes, (400.0, 800.0)),
+            rev: None,
+        };
+        let lines = gpui_agent::compact_lines(&tree);
+        assert!(lines.contains("s7 group \"Weather\""), "{lines}");
+        assert!(lines.contains("s7:n3 button \"Refresh\""), "{lines}");
+        assert!(lines.contains("s7:s9:save button \"Save\""), "{lines}");
+        assert!(!lines.contains("s7:n4"), "{lines}");
+        let card = &tree.nodes[0].children[1];
+        assert_eq!(card.id, "s7");
+        assert_eq!(card.children[0].id, "s7:n3");
+    }
+
+    #[test]
+    fn an_embedded_view_shows_where_its_host_shows_it() {
+        let rect = |x, y, w, h| {
+            Bounds::new(
+                Point::new(Points(x), Points(y)),
+                Size::new(Points(w), Points(h)),
+            )
+        };
+        let shown = |x, y, w, h| Visibility::Shown(rect(x, y, w, h));
+        // A button half out of its card, which the chat shows whole.
+        match clip_to_host(
+            shown(0.0, 90.0, 50.0, 20.0),
+            shown(0.0, 0.0, 200.0, 100.0),
+            true,
+        ) {
+            Visibility::Shown(part) => assert_eq!(part, rect(0.0, 90.0, 50.0, 10.0)),
+            _ => panic!("the shown half is shown"),
+        }
+        // The chat scrolled the button's part of the card away: scrolling
+        // it brings it back.
+        let away = clip_to_host(
+            shown(0.0, 150.0, 50.0, 20.0),
+            shown(0.0, 0.0, 200.0, 100.0),
+            true,
+        );
+        assert!(matches!(away, Visibility::Offscreen));
+        let cut = clip_to_host(
+            shown(0.0, 150.0, 50.0, 20.0),
+            shown(0.0, 0.0, 200.0, 100.0),
+            false,
+        );
+        assert!(matches!(cut, Visibility::Hidden));
+        let card_away = clip_to_host(shown(0.0, 0.0, 50.0, 20.0), Visibility::Offscreen, true);
+        assert!(matches!(card_away, Visibility::Offscreen));
+        let hidden_card = clip_to_host(Visibility::Offscreen, Visibility::Hidden, true);
+        assert!(matches!(hidden_card, Visibility::Hidden));
+    }
+
+    /// Only the gestures that send keys activate the app: pointer ones
+    /// leave the focus with the app in use.
+    #[test]
+    fn only_typing_gestures_activate_the_app() {
+        assert!(Gesture::Type("hi".into()).activates());
+        assert!(Gesture::SetValue("hi".into()).activates());
+        assert!(Gesture::Key("Return".into()).activates());
+        assert!(!Gesture::Press.activates());
+        assert!(!Gesture::Hover.activates());
+        assert!(!Gesture::Drag { dx: 10.0, dy: 0.0 }.activates());
+        assert!(
+            !Gesture::Scroll {
+                dx: 0.0,
+                dy: 100.0,
+                momentum: 0.0
+            }
+            .activates()
+        );
+    }
+}
