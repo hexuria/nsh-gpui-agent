@@ -36,6 +36,8 @@ objc2-core-foundation = "0.3.2"
 objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["std", "UIApplication", "UIResponder", "UIView", "UIWindow"] }
 nsh-platform-linux = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", features = ["dev"] }
 nsh-linux-host = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342" }
+nsh-platform-windows = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", features = ["dev"] }
+nsh-windows-host = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342" }
 log = "0.4"
 anyhow = "1"
 base64 = "0.22"
