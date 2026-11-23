@@ -1,0 +1,20 @@
+[package]
+name = "nsh-gpui-agent-cli"
+description = "Native Shell command line with the GPUI-agent platform hooks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "nsh-gpui-agent"
+path = "src/bin/nsh-gpui-agent.rs"
+
+[dependencies]
+anyhow.workspace = true
+nsh-cli.workspace = true
