@@ -1178,7 +1178,7 @@ impl Agent {
             if let Ok(Some((_, receiver))) = self.long_pressable_span_at(nodes, hit, at) {
                 return vec![receiver];
             }
-            return self.hold_owners(nodes, node);
+            return self.hold_owners(nodes, node, parents);
         }
         // A decorative hidden view: its hold goes where its semantic
         // owner's would.
@@ -1188,7 +1188,7 @@ impl Agent {
                 return vec![receiver];
             }
             if let Some(node) = by_id.get(&id) {
-                return self.hold_owners(nodes, node);
+                return self.hold_owners(nodes, node, parents);
             }
             current = parents.get(&id).copied().flatten();
         }
@@ -1201,7 +1201,12 @@ impl Agent {
     /// way), else every receiver the gesture can reach — the model's
     /// long-press pick and the native recognizer's. An empty list means
     /// nothing takes the hold.
-    fn hold_owners(&self, nodes: &[SemanticNode], target: &SemanticNode) -> Vec<NodeId> {
+    fn hold_owners(
+        &self,
+        nodes: &[SemanticNode],
+        target: &SemanticNode,
+        parents: &std::collections::HashMap<NodeId, Option<NodeId>>,
+    ) -> Vec<NodeId> {
         let mut current = Some(target.id);
         while let Some(id) = current {
             let Some(node) = nodes.iter().find(|node| node.id == id) else {
@@ -1211,11 +1216,18 @@ impl Agent {
                 return vec![node.id];
             }
             let mut receivers = Vec::new();
-            if let Ok(Some(receiver)) = self.scene.native_hold_receiver(id) {
+            let native = self.scene.native_hold_receiver(id).ok().flatten();
+            if let Some(receiver) = native {
                 receivers.push(receiver);
             }
             if let Ok(Pick::One(receiver)) = self.long_pressable(id)
                 && !receivers.contains(&receiver)
+                // The model pick counts raw touch listeners, which a
+                // touch-driven hold can use. But it may also land on an
+                // ancestor a press-taking child blocks natively (the pick
+                // steps over press-down/up listeners): it only counts when
+                // it sits at or below the native receiver.
+                && native.is_none_or(|native| is_descendant_or_same(receiver, native, parents))
             {
                 receivers.push(receiver);
             }

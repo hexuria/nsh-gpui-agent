@@ -1017,6 +1017,89 @@ fn a_hold_through_a_touch_observer_still_reaches_the_parents_recognizer() {
 }
 
 #[test]
+fn a_hold_refuses_a_touch_observer_that_also_takes_presses() {
+    use nsh_core::{EventMask, MountItem, ViewKind};
+
+    // Touch + PressDown takes the press in native routing (`has_press`
+    // covers the down/up listeners), so the parent's recognizer never
+    // fires: the hold must fail rather than report success.
+    let model = long_press_only_scene(false);
+    let mut events = EventMask::default();
+    events.set(EventKind::Touch, true);
+    events.set(EventKind::PressDown, true);
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 3,
+                frame: Bounds::new(point(px(30.0), px(40.0)), size(px(20.0), px(20.0))),
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Events { id: 3, events },
+        ],
+    });
+    let bounds = [(
+        2,
+        Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+    )];
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(model, Ok(Some(3)), &bounds, &[], long_presses.clone());
+
+    let error = agent.long_press_node(2, None).unwrap_err();
+
+    assert!(error.contains("occluded"), "{error}");
+    assert!(long_presses.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_hold_refuses_a_press_down_child_even_without_touch() {
+    use nsh_core::{EventMask, MountItem, ViewKind};
+
+    // PressDown alone also takes the press natively: the model's pick
+    // steps over it to the long-pressable parent, but the recognizer
+    // there can never fire.
+    let model = long_press_only_scene(false);
+    let mut events = EventMask::default();
+    events.set(EventKind::PressDown, true);
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 3,
+                frame: Bounds::new(point(px(30.0), px(40.0)), size(px(20.0), px(20.0))),
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Events { id: 3, events },
+        ],
+    });
+    let bounds = [(
+        2,
+        Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+    )];
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(model, Ok(Some(3)), &bounds, &[], long_presses.clone());
+
+    let error = agent.long_press_node(2, None).unwrap_err();
+
+    assert!(error.contains("occluded"), "{error}");
+    assert!(long_presses.lock().unwrap().is_empty());
+}
+
+#[test]
 fn a_touch_observer_takes_a_hold_targeted_at_it() {
     use nsh_core::{EventMask, MountItem, ViewKind};
 
@@ -2563,13 +2646,21 @@ fn fire_keybinding_dispatches_an_aliased_shared_chord_by_identity() {
 
 #[test]
 fn fire_keybinding_dispatches_a_short_spelled_shared_chord_by_identity() {
-    // Menu labels spell these keys short: `ctrl-pageup` in the keymap and
-    // `ctrl+pgup` in the catalogue are one chord.
+    // The menu catalogue spells these keys short (its `Key::label()` gives
+    // `pgup`, `pgdn`, `ins`): a keymap `ctrl-pageup` and a catalogue
+    // `ctrl+pgup` are one chord, so the keymap entry must dispatch by
+    // identity or it could fire the menu's action.
     let records = Arc::new(KeybindingRecords::default());
     let agent = Agent::new(
         keybinding_scene(vec![
             keybinding("keymap.prev_tab", "ctrl-pageup"),
-            keybinding("keymap.prev_doc", "ctrl+pgup"),
+            SemanticKeybinding {
+                id: "menu.File/#7".into(),
+                chord: "ctrl+pgup".into(),
+                label: Some("Previous".into()),
+                menu_path: Some(vec!["File".into(), "Previous".into()]),
+                menu_action_id: Some(7),
+            },
         ]),
         Box::new(KeybindingNative {
             identity: true,
@@ -2577,11 +2668,11 @@ fn fire_keybinding_dispatches_a_short_spelled_shared_chord_by_identity() {
         }),
     );
 
-    agent.fire_keybinding("keymap.prev_doc").unwrap();
+    agent.fire_keybinding("keymap.prev_tab").unwrap();
 
     assert_eq!(
         *records.fired.lock().unwrap(),
-        vec!["keymap.prev_doc".to_string()]
+        vec!["keymap.prev_tab".to_string()]
     );
     assert!(records.sent.lock().unwrap().is_empty());
 }
