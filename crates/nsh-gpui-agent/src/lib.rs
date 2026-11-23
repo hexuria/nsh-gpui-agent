@@ -367,11 +367,12 @@ impl NshAgentHost {
             }
         };
         if !self.tab_mode && matches!(self.platform, PlatformKind::Mobile) {
-            if cfg!(target_os = "ios") {
-                names.push("paste");
-            } else if cfg!(target_os = "android") {
+            // Every mobile driver supports paste; the OS gates below are
+            // about the driver's own platform — the iOS driver runs on the
+            // macOS host, so cfg!(ios) is never true here.
+            names.push("paste");
+            if cfg!(target_os = "android") {
                 names.extend([
-                    "paste",
                     "system.rotate",
                     "system.keyboard_show",
                     "system.keyboard_hide",
