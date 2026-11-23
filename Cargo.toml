@@ -19,6 +19,9 @@ private_interfaces = "deny"
 nsh-agent-actions = { path = "crates/nsh-agent-actions" }
 nsh-gpui-agent = { path = "crates/nsh-gpui-agent" }
 gpui-agent = "=0.3.0"
+anyhow = "1"
+ctor = "1"
+jni = "0.21"
 # One NSH per build: every nsh-* crate comes from branch `gpui-agent` of the
 # fork, pinned to the tested commit (see README.md, "Which NSH to use"). An app that builds NSH from its
 # own checkout redirects these with `[patch."https://github.com/hexuria/nsh"]`.
@@ -38,6 +41,7 @@ nsh-platform-linux = { git = "https://github.com/hexuria/nsh", rev = "56add34a01
 nsh-linux-host = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342" }
 nsh-platform-windows = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", features = ["dev"] }
 nsh-windows-host = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342" }
+nsh-platform-android = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", default-features = false }
 log = "0.4"
 anyhow = "1"
 base64 = "0.22"
