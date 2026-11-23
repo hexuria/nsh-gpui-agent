@@ -1,10 +1,14 @@
 //! The semantic tree of the views a host mounted, read from its model's
 //! [`Screen`] ([`Model::screen`]).
 
+use crate::screen_data::{ScreenData, ViewData};
 use nsh_core::{
     AccessibilityRole, EventKind, NodeId, ROOT_ID as ROOT, ViewKind, desktop::MenuRole,
 };
-use nsh_testing::{MountedView, Screen, agent::Model};
+use nsh_testing::{
+    Screen,
+    agent::{Model, RemoteScene},
+};
 
 use crate::{SemanticKeybinding, SemanticNode, SemanticScene, SemanticTarget};
 
@@ -22,13 +26,109 @@ impl SemanticScene for Model {
     }
 }
 
+impl SemanticScene for RemoteScene {
+    fn semantic_tree(&self) -> Result<Vec<SemanticNode>, String> {
+        Ok(nodes(&self.screen_snapshot()?))
+    }
+
+    fn keybindings(&self) -> Result<Vec<SemanticKeybinding>, String> {
+        Ok(snapshot_keybindings(&self.screen_snapshot()?))
+    }
+
+    fn long_press_disabled(&self, id: NodeId) -> Result<bool, String> {
+        Ok(long_press_disabled(&self.screen_snapshot()?, id))
+    }
+}
+
+fn snapshot_keybindings(screen: &nsh_testing::snapshot::ScreenSnapshot) -> Vec<SemanticKeybinding> {
+    let mut bindings = Vec::new();
+    if let Some(keymap) = &screen.keymap {
+        bindings.extend(keymap.iter().map(|binding| SemanticKeybinding {
+            id: format!(
+                "keymap.{}.{}",
+                binding.id,
+                binding.keystroke.replace('+', "-")
+            ),
+            chord: binding.keystroke.clone(),
+            ..SemanticKeybinding::default()
+        }));
+    }
+    if let Some(menu) = &screen.app_menu {
+        snapshot_menu_keybindings(menu, &mut Vec::new(), &mut bindings);
+    }
+    bindings
+}
+
+fn snapshot_menu_keybindings(
+    items: &[nsh_testing::snapshot::MenuItemSnapshot],
+    path: &mut Vec<String>,
+    out: &mut Vec<SemanticKeybinding>,
+) {
+    use nsh_core::element::PropEnum;
+    use nsh_testing::snapshot::MenuItemSnapshot;
+    for item in items {
+        match item {
+            MenuItemSnapshot::Submenu {
+                label,
+                enabled: true,
+                items,
+                ..
+            } => {
+                path.push(label.clone());
+                snapshot_menu_keybindings(items, path, out);
+                path.pop();
+            }
+            MenuItemSnapshot::Action {
+                id,
+                label,
+                shortcut: Some(shortcut),
+                enabled: true,
+                role,
+                ..
+            } => {
+                let mut keys = Vec::new();
+                if shortcut.ctrl {
+                    keys.push("ctrl".to_owned());
+                }
+                if shortcut.alt {
+                    keys.push("alt".to_owned());
+                }
+                if shortcut.shift {
+                    keys.push("shift".to_owned());
+                }
+                if shortcut.meta {
+                    keys.push("cmd".to_owned());
+                }
+                keys.push(shortcut.key.to_lowercase());
+                let mut menu_path = path.clone();
+                menu_path.push(label.clone());
+                let fallback = MenuRole::ALL
+                    .iter()
+                    .find(|r| Some(r.js_name()) == role.as_deref())
+                    .map_or("", |r| r.label());
+                out.push(SemanticKeybinding {
+                    id: format!("menu.{}#{}", menu_path.join("/"), id),
+                    chord: keys.join("+"),
+                    label: Some(if label.is_empty() {
+                        fallback.to_owned()
+                    } else {
+                        label.clone()
+                    }),
+                    menu_path: Some(menu_path),
+                    menu_action_id: Some(*id),
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
 /// [`SemanticScene::long_press_disabled`] on `screen`.
-fn long_press_disabled(screen: &Screen, id: NodeId) -> bool {
-    let listens = |view: &MountedView<'_>| {
-        let events = view.events();
-        events.contains(EventKind::LongPress)
-            || events.contains(EventKind::Press)
-            || events.contains(EventKind::Touch)
+fn long_press_disabled(screen: &impl ScreenData, id: NodeId) -> bool {
+    let listens = |view: &ViewData<'_>| {
+        view.listens(EventKind::LongPress)
+            || view.listens(EventKind::Press)
+            || view.listens(EventKind::Touch)
     };
     let mut at = id;
     let receiver = loop {
@@ -117,7 +217,7 @@ fn semantic_role(role: AccessibilityRole, kind: Option<ViewKind>, pressable: boo
     }
 }
 
-pub(crate) fn nodes(screen: &Screen) -> Vec<SemanticNode> {
+pub(crate) fn nodes(screen: &impl ScreenData) -> Vec<SemanticNode> {
     let mut nodes: Vec<SemanticNode> = Vec::new();
     // Where each node is in `nodes`, for the hidden views under it.
     let mut at = std::collections::HashMap::new();
@@ -143,7 +243,7 @@ pub(crate) fn nodes(screen: &Screen) -> Vec<SemanticNode> {
         if hidden {
             // A press on it goes to it, or to the hidden view around
             // it that takes presses, not to `parent`.
-            let hidden_press = if view.events().contains(EventKind::Press) {
+            let hidden_press = if view.listens(EventKind::Press) {
                 Some(id)
             } else {
                 hidden_press
@@ -165,11 +265,7 @@ pub(crate) fn nodes(screen: &Screen) -> Vec<SemanticNode> {
             );
             continue;
         }
-        let role = semantic_role(
-            view.role(),
-            view.kind(),
-            view.events().contains(EventKind::Press),
-        );
+        let role = semantic_role(view.role(), view.kind(), view.listens(EventKind::Press));
         let masked = view.secure();
         // A masked input's text never leaves: a bullet per character,
         // as platform secure fields show it.
@@ -184,7 +280,6 @@ pub(crate) fn nodes(screen: &Screen) -> Vec<SemanticNode> {
             view.accessibility_value().and_then(|value| {
                 value
                     .text
-                    .as_deref()
                     .map(str::to_owned)
                     .or_else(|| value.now.map(|number| number.to_string()))
             })
@@ -235,7 +330,7 @@ pub(crate) fn nodes(screen: &Screen) -> Vec<SemanticNode> {
             clipping: view.clips() || view.scrolls(),
             input: view.kind() == Some(ViewKind::Input),
             scroll: view.kind() == Some(ViewKind::Scroll) || view.scrolls(),
-            pressable: view.events().contains(EventKind::Press),
+            pressable: view.listens(EventKind::Press),
             states,
             native_target: if view.canvas_node() {
                 view.parent()
@@ -379,6 +474,102 @@ mod tests {
             id,
             props: Box::new(props),
         }
+    }
+
+    #[test]
+    fn remote_snapshots_match_local_semantics_and_propagate_bad_replies() {
+        let mut screen = Screen::default();
+        let mut events = EventMask::default();
+        events.set(EventKind::Press, true);
+        screen.apply(&batch(vec![
+            create(2, ViewKind::View),
+            insert(1, 2),
+            props(2, |p| {
+                p.accessibility.state.disabled = true;
+            }),
+            MountItem::Events { id: 2, events },
+            create(3, ViewKind::Text),
+            insert(2, 3),
+            props(3, |p| {
+                p.accessibility.hidden = true;
+            }),
+            create(4, ViewKind::Input),
+            insert(1, 4),
+            MountItem::Input {
+                id: 4,
+                config: Box::new(InputConfig {
+                    secure: true,
+                    ..Default::default()
+                }),
+            },
+            MountItem::InputValue {
+                id: 4,
+                text: "secreté".into(),
+                count: 0,
+            },
+        ]));
+        let expected = nodes(&screen);
+        let snapshot = screen.snapshot();
+        let wire = serde_json::to_value(snapshot).unwrap();
+        let remote = RemoteScene::new(move |step| {
+            assert_eq!(
+                step,
+                nsh_dev::protocol::TestStep::Scene {
+                    query: nsh_dev::protocol::SceneQuery::ScreenSnapshot
+                }
+            );
+            Ok(wire.clone())
+        });
+        assert_eq!(remote.semantic_tree().unwrap(), expected);
+        assert!(remote.long_press_disabled(3).unwrap());
+        assert!(remote.keybindings().unwrap().is_empty());
+        let empty =
+            RemoteScene::new(|_| Ok(serde_json::to_value(Screen::default().snapshot()).unwrap()));
+        assert_eq!(empty.semantic_tree().unwrap(), nodes(&Screen::default()));
+        let bad = RemoteScene::new(|_| Ok(serde_json::json!({})));
+        assert!(bad.semantic_tree().is_err());
+        assert!(bad.keybindings().is_err());
+        assert!(bad.long_press_disabled(2).is_err());
+        let failed = RemoteScene::new(|_| Err("disconnected".into()));
+        assert_eq!(failed.semantic_tree().unwrap_err(), "disconnected");
+    }
+
+    #[test]
+    fn snapshot_keybindings_match_live_menu_roles_and_disabled_sections() {
+        let mut screen = Screen::default();
+        let action = MenuItem::Action(MenuAction {
+            id: 9,
+            label: String::new(),
+            shortcut: Some(Shortcut::parse("ctrl+s", false).unwrap()),
+            enabled: true,
+            checked: None,
+            role: Some(MenuRole::Quit),
+            when: When::Auto,
+            icon: None,
+            symbol: None,
+            destructive: false,
+        });
+        screen.apply(&batch(vec![MountItem::Command {
+            id: ROOT,
+            command: Command::Desktop(Box::new(DesktopCommand::SetMenu(Some(
+                vec![
+                    action.clone(),
+                    MenuItem::Submenu {
+                        label: "Disabled".into(),
+                        enabled: false,
+                        items: vec![action],
+                        inline: false,
+                        icon: None,
+                        symbol: None,
+                    },
+                ]
+                .into(),
+            )))),
+        }]));
+        assert_eq!(
+            snapshot_keybindings(&screen.snapshot()),
+            keybindings(&screen)
+        );
     }
 
     #[test]
