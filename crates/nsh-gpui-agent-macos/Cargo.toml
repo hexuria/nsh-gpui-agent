@@ -12,7 +12,7 @@ publish.workspace = true
 workspace = true
 
 [features]
-default = []
+default = ["dev-agent"]
 dev-agent = []
 gpui-agent = []
 gpui-agent-server = ["gpui-agent"]

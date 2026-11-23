@@ -1,9 +1,10 @@
 //! macOS development-surface integration for NSH's gpui-agent.
 //!
 //! Empty off macOS. Call [`install`] before opening any development
-//! surfaces. With `GPUI_AGENT=1` and the upstream token/address settings,
-//! each surface gets the strict adapter worker. With feature
-//! `gpui-agent-server`, buwiz's in-process server is compiled as well;
+//! surfaces. In a debug build with feature `dev-agent`, `GPUI_AGENT=1` and
+//! the upstream token/address settings give each surface a strict adapter
+//! worker. Feature `gpui-agent-server` compiles buwiz's in-process server
+//! instead; as on buwiz, it owns the listener when both are enabled.
 //! `gpui-agent` alone provides the in-process tree and action API.
 
 #![cfg(target_os = "macos")]
@@ -14,8 +15,19 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+#[cfg(all(
+    feature = "dev-agent",
+    not(feature = "gpui-agent-server"),
+    debug_assertions
+))]
 use nsh_agent_actions::Agent;
-use nsh_gpui_agent::{NshAgentHost, PlatformKind, WorkerHandle};
+use nsh_gpui_agent::WorkerHandle;
+#[cfg(all(
+    feature = "dev-agent",
+    not(feature = "gpui-agent-server"),
+    debug_assertions
+))]
+use nsh_gpui_agent::{NshAgentHost, PlatformKind};
 #[cfg(feature = "gpui-agent")]
 use nsh_platform_macos::surface::Surface;
 use nsh_platform_macos::surface::SurfaceHandle;
@@ -66,12 +78,29 @@ fn opened(opened: &OpenedSurface<'_>) -> Option<SurfaceAttachment> {
     models.retain(|_, model| model.strong_count() > 0);
     models.insert(key, Arc::downgrade(&model));
     let alive = Arc::new(AtomicBool::new(true));
-    let native = MacStrictNative::new(key, alive.clone());
-    let agent = Arc::new(Agent::requiring_native_hit_test(
-        model.clone(),
-        Box::new(native),
-    ));
-    let worker = match NshAgentHost::new("Native Shell", PlatformKind::Desktop, agent) {
+    let worker = start_strict_worker(key, model.clone(), alive.clone());
+    Some(SurfaceAttachment::new(
+        Some(model),
+        Box::new(Attachment {
+            alive,
+            _worker: worker,
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "dev-agent",
+    not(feature = "gpui-agent-server"),
+    debug_assertions
+))]
+fn start_strict_worker(
+    key: u64,
+    model: Arc<Model>,
+    alive: Arc<AtomicBool>,
+) -> Option<WorkerHandle> {
+    let native = MacStrictNative::new(key, alive);
+    let agent = Arc::new(Agent::requiring_native_hit_test(model, Box::new(native)));
+    match NshAgentHost::new("Native Shell", PlatformKind::Desktop, agent) {
         Ok(host) => match nsh_gpui_agent::start_from_env(host) {
             Ok(worker) => worker,
             Err(error) => {
@@ -83,14 +112,20 @@ fn opened(opened: &OpenedSurface<'_>) -> Option<SurfaceAttachment> {
             log::error!("cannot construct the GPUI-agent development host: {error}");
             None
         }
-    };
-    Some(SurfaceAttachment::new(
-        Some(model),
-        Box::new(Attachment {
-            alive,
-            _worker: worker,
-        }),
-    ))
+    }
+}
+
+#[cfg(not(all(
+    feature = "dev-agent",
+    not(feature = "gpui-agent-server"),
+    debug_assertions
+)))]
+fn start_strict_worker(
+    _key: u64,
+    _model: Arc<Model>,
+    _alive: Arc<AtomicBool>,
+) -> Option<WorkerHandle> {
+    None
 }
 
 /// The batch count and pending-work bit the legacy server settles on.
