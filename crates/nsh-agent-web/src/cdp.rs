@@ -121,7 +121,7 @@ pub(crate) struct Browser {
     socket: Mutex<WebSocket<MaybeTlsStream<TcpStream>>>,
     next: AtomicU64,
     /// Its profile, removed after it.
-    profile: PathBuf,
+    profile: Profile,
     output: ui::Tail,
     closed: AtomicBool,
 }
@@ -141,13 +141,18 @@ impl Browser {
             std::process::id(),
             NEXT_PROFILE.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = std::fs::remove_dir_all(&profile);
-        std::fs::create_dir_all(&profile)
-            .map_err(|e| format!("cannot make {}: {e}", profile.display()))?;
-        let mut command = command(exe, headed, &profile);
+        Self::launch_in(exe, headed, profile)
+    }
+
+    fn launch_in(exe: &Path, headed: bool, profile: PathBuf) -> Result<Browser, String> {
+        let profile = Profile(profile);
+        let _ = std::fs::remove_dir_all(&profile.0);
+        std::fs::create_dir_all(&profile.0)
+            .map_err(|e| format!("cannot make {}: {e}", profile.0.display()))?;
+        let mut command = command(exe, headed, &profile.0);
         let (mut child, output) =
             ui::quiet(&mut command).map_err(|e| format!("cannot start {}: {e}", exe.display()))?;
-        let port_file = profile.join("DevToolsActivePort");
+        let port_file = profile.0.join("DevToolsActivePort");
         let deadline = Instant::now() + START;
         let url = loop {
             if let Ok(text) = std::fs::read_to_string(&port_file) {
@@ -317,13 +322,21 @@ impl Browser {
         let _ = child.kill();
         let _ = child.wait();
         drop(child);
-        let _ = std::fs::remove_dir_all(&self.profile);
+        let _ = std::fs::remove_dir_all(&self.profile.0);
     }
 }
 
 impl Drop for Browser {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+struct Profile(PathBuf);
+
+impl Drop for Profile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -441,11 +454,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn failed_spawn_removes_the_profile() {
+        let profile = std::env::temp_dir().join(format!("nsh-failed-spawn-{}", std::process::id()));
+        assert!(Browser::launch_in(Path::new("/no/such/browser"), false, profile.clone()).is_err());
+        assert!(!profile.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn early_exit_and_failed_connection_remove_the_profile() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("nsh-failed-connect-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let exe = root.join("browser");
+        let profile = root.join("profile");
+        for body in [
+            "exit 1\n",
+            "for arg in \"$@\"; do case \"$arg\" in --user-data-dir=*) profile=${arg#*=};; esac; done\nprintf '0\\n/not-a-browser\\n' > \"$profile/DevToolsActivePort\"\nsleep 5\n",
+        ] {
+            std::fs::write(&exe, format!("#!/bin/sh\n{body}")).unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let error = Browser::launch_in(&exe, false, profile.clone())
+                .err()
+                .unwrap();
+            assert!(
+                error.contains("exited") || error.contains("cannot connect"),
+                "{error}"
+            );
+            assert!(!profile.exists());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     #[cfg(not(any(target_os = "macos", windows)))]
     fn stock_chrome_is_the_last_path_candidate() {
         assert_eq!(LINUX_NAMES.last(), Some(&"chrome"));
-        let dirs: Vec<_> = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-            .collect();
+        let dirs: Vec<_> =
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
         let paths = candidates();
         let chrome: Vec<_> = dirs.iter().map(|dir| dir.join("chrome")).collect();
         assert!(paths.ends_with(&chrome));
