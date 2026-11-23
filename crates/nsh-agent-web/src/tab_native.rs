@@ -311,6 +311,25 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_email_home_releases_before_returning_the_page_error() {
+        let error = "key \"Home\" cannot be synthesized; use type for text";
+        let response: Value = serde_json::from_str(
+            r#"{"dispatched":true,"error":"key \"Home\" cannot be synthesized; use type for text"}"#,
+        ).unwrap();
+        let mut phases = Vec::new();
+        let result = key_pair(|phase| {
+            phases.push(phase);
+            Ok(if phase == SynthKeyPhase::Down {
+                response.clone()
+            } else {
+                Value::Null
+            })
+        });
+        assert_eq!(phases, [SynthKeyPhase::Down, SynthKeyPhase::Up]);
+        assert_eq!(result, Err(error.into()));
+    }
+
+    #[test]
     fn dispatch_failures_do_not_release_a_key_that_was_not_pressed() {
         let mut phases = Vec::new();
         assert_eq!(

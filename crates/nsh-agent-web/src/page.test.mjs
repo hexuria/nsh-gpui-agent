@@ -37,13 +37,9 @@ test("caret and word defaults refuse an actual email input without selection off
         ...["ArrowLeft", "ArrowRight", "Backspace"].map(key => [key, { meta: true }]),
       ];
       for (const [key, modifiers] of cases) {
-        let error;
-        try {
-          const result = nshPageSteps.synth({ event: "key", phase: "down", key, ...modifiers }, player);
-          if (result?.dispatched && result.error) throw new Error(result.error);
-        }
-        catch (e) { error = e; }
-        if (!error?.message.includes("cannot be synthesized")) throw new Error("silently accepted " + key);
+        const result = nshPageSteps.synth({ event: "key", phase: "down", key, ...modifiers }, player);
+        const expected = { dispatched: true, error: "key " + JSON.stringify(key) + " cannot be synthesized; use type for text" };
+        if (JSON.stringify(result) !== JSON.stringify(expected)) throw new Error("unexpected response for " + key + ": " + JSON.stringify(result));
       }
       field.addEventListener("keydown", event => event.preventDefault());
       nshPageSteps.synth({ event: "key", phase: "down", key: "Home" }, player);

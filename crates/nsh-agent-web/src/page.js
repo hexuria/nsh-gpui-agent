@@ -215,9 +215,7 @@ function synthesize(event) {
             && !lineAction
             && !["Control", "Alt", "Meta", "Shift"].includes(key))
         ));
-      const unsupported = () => {
-        throw Object.assign(new Error(`key ${JSON.stringify(key)} cannot be synthesized; use type for text`), { dispatched: true });
-      };
+      const unsupported = () => ({ dispatched: true, error: `key ${JSON.stringify(key)} cannot be synthesized; use type for text` });
       const keyEvent = new KeyboardEvent(event.phase === "down" ? "keydown" : "keyup", {
         key: event.key, code: event.code, shiftKey: event.shift, ctrlKey: event.ctrl,
         altKey: event.alt, metaKey: event.meta, bubbles: true, composed: true, cancelable: true,
@@ -243,11 +241,11 @@ function synthesize(event) {
         return;
       }
       if (!editable) {
-        if (browserDefaultSkipped) unsupported();
+        if (browserDefaultSkipped) return unsupported();
         return;
       }
       if (caretKeys.includes(key) && !caret) {
-        if (browserDefaultSkipped) unsupported();
+        if (browserDefaultSkipped) return unsupported();
         return;
       }
       if (wordAction || lineAction) {
@@ -267,7 +265,7 @@ function synthesize(event) {
           return;
         }
         const selected = inputSelection(target);
-        if (!selected) unsupported();
+        if (!selected) return unsupported();
         const { start, end, backward: selectionBackward } = selected;
         const anchor = start === end ? start : selectionBackward ? end : start;
         const position = start === end ? start : selectionBackward ? start : end;
@@ -307,13 +305,13 @@ function synthesize(event) {
         return;
       }
       if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(key)) {
-        if (browserDefaultSkipped) unsupported();
+        if (browserDefaultSkipped) return unsupported();
         return;
       }
       if (input) {
         const value = target.value;
         const selected = inputSelection(target);
-        if (!selected) unsupported();
+        if (!selected) return unsupported();
         const { start, end, backward } = selected;
         const anchor = start === end ? start : backward ? end : start;
         let position = start === end ? start : backward ? start : end;
@@ -467,13 +465,5 @@ const handlers = globalThis.nshPageSteps ??= Object.create(null);
 for (const name of ["hit_at", "focus", "focused", "app_focused", "input_text", "editable"]) {
 handlers[name] = (args, player) => question.call(player, { ...args, query: name });
 }
-handlers.synth = (event, player) => {
-  try {
-    synthesize.call(player, event);
-    return null;
-  } catch (error) {
-    if (error.dispatched) return { dispatched: true, error: error.message };
-    throw error;
-  }
-};
+handlers.synth = (event, player) => synthesize.call(player, event) ?? null;
 })();
