@@ -143,6 +143,11 @@ pub struct SemanticNode {
     /// innermost hidden view around it that takes presses).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_press_owners: Vec<(NodeId, NodeId)>,
+    /// Those of [`SemanticNode::hidden_descendants`] a long press goes
+    /// to a hidden view of their own: each with that view (itself, or
+    /// the innermost hidden view around it that takes holds).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_hold_owners: Vec<(NodeId, NodeId)>,
 }
 
 /// A keyboard shortcut the host can fire through its native input path.
@@ -1064,26 +1069,28 @@ impl Agent {
             }
             PointActionability::LongPress => {
                 let selector = format!("view:{id}");
-                match self.long_pressable(id)? {
-                    Pick::One(receiver) => receiver,
-                    Pick::None => {
-                        if let Some(input) = press_owner(&nodes, node).filter(|owner| {
-                            nodes.iter().any(|candidate| {
-                                candidate.id == *owner && candidate.input && candidate.enabled
-                            })
-                        }) {
-                            target = input;
-                            input
-                        } else if let Some((span, receiver)) =
-                            self.long_pressable_span_at(&nodes, id, at)?
-                        {
-                            target = span;
-                            receiver
-                        } else {
-                            self.picked(Pick::None, &selector, "pressable view")?
+                // A hold on a link inside pressable text goes to the
+                // span's receiver, as a tap would.
+                if let Some((span, receiver)) = self.long_pressable_span_at(&nodes, id, at)? {
+                    target = span;
+                    receiver
+                } else {
+                    match self.long_pressable(id)? {
+                        Pick::One(receiver) => receiver,
+                        Pick::None => {
+                            if let Some(input) = press_owner(&nodes, node).filter(|owner| {
+                                nodes.iter().any(|candidate| {
+                                    candidate.id == *owner && candidate.input && candidate.enabled
+                                })
+                            }) {
+                                target = input;
+                                input
+                            } else {
+                                self.picked(Pick::None, &selector, "pressable view")?
+                            }
                         }
+                        pick => self.picked(pick, &selector, "pressable view")?,
                     }
-                    pick => self.picked(pick, &selector, "pressable view")?,
                 }
             }
         };
@@ -1140,7 +1147,8 @@ impl Agent {
     }
 
     /// The innermost span of text view `text` matching `hears` whose
-    /// characters are at `at`.
+    /// characters are at `at`: the smallest matching range wins, as
+    /// `link_at` resolves it, with ties going to the span mounted first.
     fn span_at<'a>(
         &self,
         nodes: &'a [SemanticNode],
@@ -1148,15 +1156,6 @@ impl Agent {
         at: Point<Points>,
         hears: impl Fn(&SemanticNode) -> bool,
     ) -> Option<&'a SemanticNode> {
-        let depth = |node: &SemanticNode| {
-            let mut depth = 0usize;
-            let mut parent = node.parent;
-            while let Some(id) = parent {
-                depth += 1;
-                parent = nodes.iter().find(|node| node.id == id).and_then(|node| node.parent);
-            }
-            depth
-        };
         nodes
             .iter()
             .filter(|node| {
@@ -1168,7 +1167,10 @@ impl Agent {
                             .text_bounds(owner, start, end)
                             .is_some_and(|bounds| bounds.contains(&at)))
             })
-            .max_by_key(|node| depth(node))
+            .min_by_key(|node| match node.native_target {
+                SemanticTarget::Text { start, end, .. } => end - start,
+                _ => 0,
+            })
     }
 
     /// The view a press at `at` (which natively hit `hit`) goes to: the
@@ -1219,11 +1221,11 @@ impl Agent {
         nodes: &[SemanticNode],
         by_id: &std::collections::HashMap<NodeId, &SemanticNode>,
         parents: &std::collections::HashMap<NodeId, Option<NodeId>>,
-        hidden_press_owners: &std::collections::HashMap<NodeId, NodeId>,
+        hidden_hold_owners: &std::collections::HashMap<NodeId, NodeId>,
         hit: NodeId,
         at: Point<Points>,
     ) -> Vec<NodeId> {
-        if let Some(&receiver) = hidden_press_owners.get(&hit) {
+        if let Some(&receiver) = hidden_hold_owners.get(&hit) {
             return vec![receiver];
         }
         if let Some(node) = by_id.get(&hit).copied() {
@@ -1236,7 +1238,7 @@ impl Agent {
         // owner's would.
         let mut current = parents.get(&hit).copied().flatten();
         while let Some(id) = current {
-            if let Some(&receiver) = hidden_press_owners.get(&id) {
+            if let Some(&receiver) = hidden_hold_owners.get(&id) {
                 return vec![receiver];
             }
             if let Some(node) = by_id.get(&id) {
@@ -1541,6 +1543,12 @@ impl Agent {
             .iter()
             .flat_map(|node| node.hidden_press_owners.iter().copied())
             .collect();
+        // A hold's hidden owners are its own set: a view listening only
+        // for long presses reserves the hold, not the tap.
+        let hidden_hold_owners: std::collections::HashMap<NodeId, NodeId> = nodes
+            .iter()
+            .flat_map(|node| node.hidden_hold_owners.iter().copied())
+            .collect();
         let deadline = Instant::now() + Duration::from_millis(100);
         loop {
             match self.native.hit_at(at) {
@@ -1578,7 +1586,7 @@ impl Agent {
                                     &nodes,
                                     &by_id,
                                     &parents,
-                                    &hidden_press_owners,
+                                    &hidden_hold_owners,
                                     hit,
                                     at,
                                 );
