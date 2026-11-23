@@ -39,6 +39,10 @@ pub fn install() {
 
 fn opened(opened: &OpenedSurface<'_>) -> Option<SurfaceAttachment> {
     let surface = opened.surface.downcast_ref::<DevSurface>()?.clone();
+    if let Ok(None) = nsh_gpui_agent::worker_config_from_env() {
+        // The agent is off: attach nothing, and no mount batch is mirrored.
+        return None;
+    }
     let model = Arc::new(Model::default());
     let alive = Arc::new(AtomicBool::new(true));
     let native = LinuxNative {
@@ -309,6 +313,20 @@ fn synthesized(stroke: nsh_core::keymap::Keystroke) -> Option<Synthesized> {
         K::Char(c) if plain => Synthesized::Char(if m.shift { shifted(c) } else { c }),
         K::Escape => Synthesized::Back(gdk::Key::Escape),
         K::Left => Synthesized::Back(gdk::Key::Left),
+        K::Right => Synthesized::Back(gdk::Key::Right),
+        K::Up => Synthesized::Back(gdk::Key::Up),
+        K::Down => Synthesized::Back(gdk::Key::Down),
+        K::Tab => Synthesized::Back(if m.shift {
+            gdk::Key::ISO_Left_Tab
+        } else {
+            gdk::Key::Tab
+        }),
+        K::Home => Synthesized::Back(gdk::Key::Home),
+        K::End => Synthesized::Back(gdk::Key::End),
+        K::PageUp => Synthesized::Back(gdk::Key::Page_Up),
+        K::PageDown => Synthesized::Back(gdk::Key::Page_Down),
+        K::Delete => Synthesized::Back(gdk::Key::Delete),
+        K::Insert => Synthesized::Back(gdk::Key::Insert),
         _ => return None,
     })
 }
@@ -448,6 +466,18 @@ mod tests {
         assert!(matches!(
             synthesized(Keystroke::parse("ctrl+shift+z", Os::Linux).unwrap()),
             Some(Synthesized::Undo { redo: true })
+        ));
+        assert!(matches!(
+            synthesized(Keystroke::parse("Tab", Os::Linux).unwrap()),
+            Some(Synthesized::Back(gdk::Key::Tab))
+        ));
+        assert!(matches!(
+            synthesized(Keystroke::parse("Right", Os::Linux).unwrap()),
+            Some(Synthesized::Back(gdk::Key::Right))
+        ));
+        assert!(matches!(
+            synthesized(Keystroke::parse("shift+Tab", Os::Linux).unwrap()),
+            Some(Synthesized::Back(gdk::Key::ISO_Left_Tab))
         ));
         assert!(synthesized(Keystroke::parse("F12", Os::Linux).unwrap()).is_none());
         assert!(Keystroke::parse("", Os::Linux).is_err());
