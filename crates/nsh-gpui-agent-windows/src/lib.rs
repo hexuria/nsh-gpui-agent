@@ -78,6 +78,10 @@ pub fn install() {
 
 fn opened(opened: &OpenedSurface<'_>) -> Option<SurfaceAttachment> {
     let surface = opened.surface.downcast_ref::<DevSurface>()?.clone();
+    if let Ok(None) = nsh_gpui_agent::worker_config_from_env() {
+        // The agent is off: attach nothing, and no mount batch is mirrored.
+        return None;
+    }
     let attachment = Rc::new(Attachment {
         model: Arc::new(Model::default()),
         available: Arc::new(AtomicBool::new(true)),
