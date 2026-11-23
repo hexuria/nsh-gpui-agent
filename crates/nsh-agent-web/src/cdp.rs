@@ -460,30 +460,40 @@ mod tests {
         assert!(!profile.exists());
     }
 
-    #[test]
     #[cfg(unix)]
-    fn early_exit_and_failed_connection_remove_the_profile() {
+    fn failed_launch_fixture(name: &str, body: &str) -> (String, bool) {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("nsh-failed-connect-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("nsh-failed-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let exe = root.join("browser");
         let profile = root.join("profile");
-        for body in [
-            "exit 1\n",
-            "for arg in \"$@\"; do case \"$arg\" in --user-data-dir=*) profile=${arg#*=};; esac; done\nprintf '0\\n/not-a-browser\\n' > \"$profile/DevToolsActivePort\"\nsleep 5\n",
-        ] {
-            std::fs::write(&exe, format!("#!/bin/sh\n{body}")).unwrap();
-            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let error = Browser::launch_in(&exe, false, profile.clone())
-                .err()
-                .unwrap();
-            assert!(
-                error.contains("exited") || error.contains("cannot connect"),
-                "{error}"
-            );
-            assert!(!profile.exists());
-        }
+        std::fs::write(&exe, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error = Browser::launch_in(&exe, false, profile.clone())
+            .err()
+            .unwrap();
+        let profile_removed = !profile.exists();
         std::fs::remove_dir_all(root).unwrap();
+        (error, profile_removed)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn early_exit_removes_the_profile() {
+        let (error, profile_removed) = failed_launch_fixture("exit", "exit 1\n");
+        assert!(error.contains("exited"), "{error}");
+        assert!(profile_removed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn failed_connection_removes_the_profile() {
+        let (error, profile_removed) = failed_launch_fixture(
+            "connect",
+            "for arg in \"$@\"; do case \"$arg\" in --user-data-dir=*) profile=${arg#*=};; esac; done\nprintf '0\\n/not-a-browser\\n' > \"$profile/DevToolsActivePort\"\nexec sleep 60\n",
+        );
+        assert!(error.contains("cannot connect"), "{error}");
+        assert!(profile_removed);
     }
 
     #[test]
