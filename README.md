@@ -19,16 +19,16 @@ and take screenshots, over a loopback connection the app opens only when it is t
 
 ## Which NSH to use
 
-**Use the pinned commit below from `https://github.com/hexuria/nsh`.** The Linux doors are on
-`devin/linux-agent-doors` until merged into `gpui-agent`; upstream NSH on its own does not work.
+**Use the pinned commit below from `https://github.com/hexuria/nsh`, branch `gpui-agent`.**
+Upstream NSH on its own does not have the required doors.
 
 | | |
 |---|---|
 | Repository | `https://github.com/hexuria/nsh` |
-| Branch | `devin/linux-agent-doors` (Linux doors on top of `gpui-agent`) |
+| Branch | `gpui-agent` |
 | What it is | An upstream release of `longbridge/nsh` plus a small set of doors, and nothing else |
 | Upstream release it sits on | `v0.6.1` (`2f51d8611`) |
-| Commit this repository is tested with | [`c367eea75`](https://github.com/hexuria/nsh/commit/c367eea75cf708b550ce9dc04844cda2e318ad7d) |
+| Commit this repository is tested with | [`7d140d394`](https://github.com/hexuria/nsh/commit/7d140d39428f0e797bedd36357af807071e5d338) |
 | The doors | `SOCKET.md` at the root of that branch lists every one |
 
 A *door* is a small change that makes something in NSH public: an accessor, or a hook that calls out. A door holds
@@ -39,7 +39,7 @@ The branch is rebased onto each new upstream release, so depend on a commit, not
 
 ```toml
 [dependencies]
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "c367eea75cf708b550ce9dc04844cda2e318ad7d", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "7d140d39428f0e797bedd36357af807071e5d338", default-features = false, features = ["agent"] }
 ```
 
 ## Using it from an app
@@ -102,7 +102,7 @@ Filled in from real runs on each platform's own machine. Headless tests on Linux
 | Platform | Status | Tested on |
 |---|---|---|
 | macOS | not run yet | |
-| Linux | Xvfb gallery actions exercised; 23/23 JSON files identical, PNG differences confined to the input caret (above) | Ubuntu 24.04 sidecar, GTK 4.14.5 / WebKitGTK 2.52.6 |
+| Linux | Gallery action parity verified: 23/23 JSON files identical; PNG differences confined to the input caret. Build the plug's `nsh-linux-host` and select it with `NSH_RUNTIME` as above. | Ubuntu 24.04 container on Ubuntu 22.04 host, Xvfb; GTK 4.14.5 / WebKitGTK 2.52.6 |
 | Windows | not run yet | |
 | Android | not run yet | |
 | iOS | not run yet | |
