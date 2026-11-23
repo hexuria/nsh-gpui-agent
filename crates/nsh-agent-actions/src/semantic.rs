@@ -20,6 +20,29 @@ impl SemanticScene for Model {
     fn long_press_disabled(&self, id: NodeId) -> Result<bool, String> {
         Ok(self.screen(|screen| long_press_disabled(screen, id)))
     }
+
+    fn native_hold_receiver(&self, id: NodeId) -> Result<Option<NodeId>, String> {
+        Ok(self.screen(|screen| native_hold_receiver(screen, id)))
+    }
+}
+
+/// [`SemanticScene::native_hold_receiver`] on `screen`.
+fn native_hold_receiver(screen: &Screen, id: NodeId) -> Option<NodeId> {
+    let mut at = Some(id);
+    while let Some(view_id) = at {
+        let view = screen.mounted(view_id)?;
+        // A raw touch observer installs no recognizer: a hold passes it to
+        // the nearest ancestor with a press listener — the same
+        // `nsh_core::input::has_press` set native routing picks (Press,
+        // LongPress, PressDown, PressUp), so a touch observer that also
+        // hears press-down/up takes the press and blocks the hold. A
+        // disabled view's recognizer never fires either.
+        if !view.disabled() && nsh_core::input::has_press(view.events()) {
+            return Some(view_id);
+        }
+        at = view.parent();
+    }
+    None
 }
 
 /// [`SemanticScene::long_press_disabled`] on `screen`.
@@ -123,8 +146,16 @@ pub(crate) fn nodes(screen: &Screen) -> Vec<SemanticNode> {
     let mut at = std::collections::HashMap::new();
     // The last element: in a hidden subtree, the innermost hidden view
     // above that takes presses.
-    let mut stack = vec![(ROOT, None, false, false, None)];
-    while let Some((id, parent, inherited_hidden, inherited_disabled, hidden_press)) = stack.pop() {
+    let mut stack = vec![(ROOT, None, false, false, None, None)];
+    while let Some((
+        id,
+        parent,
+        inherited_hidden,
+        inherited_disabled,
+        hidden_press,
+        hidden_hold,
+    )) = stack.pop()
+    {
         let Some(view) = screen.mounted(id) else {
             continue;
         };
@@ -142,11 +173,21 @@ pub(crate) fn nodes(screen: &Screen) -> Vec<SemanticNode> {
         };
         if hidden {
             // A press on it goes to it, or to the hidden view around
-            // it that takes presses, not to `parent`.
-            let hidden_press = if view.events().contains(EventKind::Press) {
+            // it that takes presses, not to `parent`; a hold answers to
+            // long-press listeners only.
+            let events = view.events();
+            let hidden_press = if events.contains(EventKind::Press)
+                || events.contains(EventKind::PressDown)
+                || events.contains(EventKind::PressUp)
+            {
                 Some(id)
             } else {
                 hidden_press
+            };
+            let hidden_hold = if events.contains(EventKind::LongPress) {
+                Some(id)
+            } else {
+                hidden_hold
             };
             // Left out, but still under `parent` (the nearest node in
             // the tree) for native hits.
@@ -156,12 +197,18 @@ pub(crate) fn nodes(screen: &Screen) -> Vec<SemanticNode> {
                 if let Some(receiver) = hidden_press {
                     owner.hidden_press_owners.push((id, receiver));
                 }
+                if let Some(receiver) = hidden_hold {
+                    owner.hidden_hold_owners.push((id, receiver));
+                }
+                if let Some(span) = view.span() {
+                    owner.hidden_text_spans.push((id, span.view, span.start, span.end));
+                }
             }
             stack.extend(
                 children
                     .into_iter()
                     .rev()
-                    .map(|child| (child, parent, true, disabled, hidden_press)),
+                    .map(|child| (child, parent, true, disabled, hidden_press, hidden_hold)),
             );
             continue;
         }
@@ -236,6 +283,8 @@ pub(crate) fn nodes(screen: &Screen) -> Vec<SemanticNode> {
             input: view.kind() == Some(ViewKind::Input),
             scroll: view.kind() == Some(ViewKind::Scroll) || view.scrolls(),
             pressable: view.events().contains(EventKind::Press),
+            long_press: view.events().contains(EventKind::LongPress),
+            touch: view.events().contains(EventKind::Touch),
             states,
             native_target: if view.canvas_node() {
                 view.parent()
@@ -254,12 +303,14 @@ pub(crate) fn nodes(screen: &Screen) -> Vec<SemanticNode> {
             },
             hidden_descendants: Vec::new(),
             hidden_press_owners: Vec::new(),
+            hidden_hold_owners: Vec::new(),
+            hidden_text_spans: Vec::new(),
         });
         stack.extend(
             children
                 .into_iter()
                 .rev()
-                .map(|child| (child, Some(id), hidden, disabled, None)),
+                .map(|child| (child, Some(id), hidden, disabled, None, None)),
         );
     }
     nodes
@@ -562,6 +613,62 @@ mod tests {
         // Left out, the hidden views still link to the node they are under.
         assert_eq!(nodes[0].hidden_descendants, [12, 13]);
         assert!(nodes[1].hidden_descendants.is_empty());
+    }
+
+    #[test]
+    fn semantic_tree_marks_hidden_views_taking_any_press_phase() {
+        // A hidden view listening only to a press phase (down or up)
+        // still owns the gesture there — it is not decorative.
+        for event in [EventKind::Press, EventKind::PressDown, EventKind::PressUp] {
+            let mut screen = Screen::default();
+            screen.apply(&batch(vec![
+                create(10, ViewKind::View),
+                create(11, ViewKind::View),
+                insert(ROOT, 10),
+                insert(10, 11),
+                props(11, |props| props.accessibility.hidden = true),
+                MountItem::Events {
+                    id: 11,
+                    events: {
+                        let mut events = EventMask::default();
+                        events.set(event, true);
+                        events
+                    },
+                },
+            ]));
+
+            let nodes = nodes(&screen);
+            assert_eq!(
+                nodes[1].hidden_press_owners,
+                [(11, 11)],
+                "{event:?} should mark the hidden view as its own press owner"
+            );
+            assert!(
+                nodes[1].hidden_hold_owners.is_empty(),
+                "{event:?} should not mark the hidden view as a hold owner"
+            );
+        }
+
+        // A hold listener reserves the hold, not the tap.
+        let mut screen = Screen::default();
+        screen.apply(&batch(vec![
+            create(10, ViewKind::View),
+            create(11, ViewKind::View),
+            insert(ROOT, 10),
+            insert(10, 11),
+            props(11, |props| props.accessibility.hidden = true),
+            MountItem::Events {
+                id: 11,
+                events: {
+                    let mut events = EventMask::default();
+                    events.set(EventKind::LongPress, true);
+                    events
+                },
+            },
+        ]));
+        let nodes = nodes(&screen);
+        assert_eq!(nodes[1].hidden_hold_owners, [(11, 11)]);
+        assert!(nodes[1].hidden_press_owners.is_empty());
     }
 
     #[test]

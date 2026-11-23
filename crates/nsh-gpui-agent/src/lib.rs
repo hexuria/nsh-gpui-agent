@@ -12,8 +12,6 @@ use std::{
     },
 };
 
-#[cfg(feature = "dev-agent")]
-use gpui_agent::AgentServer;
 pub use gpui_agent::PlatformKind;
 use gpui_agent::{
     AgentHost, DispatchResult, HelloAuth, HelloInfo, KeybindingInfo, KeybindingScope, Op,
@@ -414,32 +412,31 @@ impl NshAgentHost {
         direction: gpui_agent::SwipeDirection,
         distance: Option<f64>,
     ) -> Result<DispatchResult, String> {
-        let viewport = self.agent.native_viewport();
-        let (width, height) = (viewport.width.0, viewport.height.0);
-        let horizontal = matches!(
-            direction,
-            gpui_agent::SwipeDirection::Left | gpui_agent::SwipeDirection::Right
-        );
-        let distance = match distance {
-            Some(distance) if distance.is_finite() && distance > 0.0 => distance as f32,
+        let explicit = match distance {
+            Some(distance) if distance.is_finite() && distance > 0.0 => Some(distance as f32),
             Some(_) => return Err("swipe distance must be finite and positive".into()),
-            None => (if horizontal { width } else { height }) * 0.4,
+            None => None,
         };
-        let delta = match direction {
-            gpui_agent::SwipeDirection::Up => Point::new(Points(0.0), Points(-distance)),
-            gpui_agent::SwipeDirection::Down => Point::new(Points(0.0), Points(distance)),
-            gpui_agent::SwipeDirection::Left => Point::new(Points(-distance), Points(0.0)),
-            gpui_agent::SwipeDirection::Right => Point::new(Points(distance), Points(0.0)),
+        let direction = match direction {
+            gpui_agent::SwipeDirection::Up => nsh_agent_actions::SwipeDirection::Up,
+            gpui_agent::SwipeDirection::Down => nsh_agent_actions::SwipeDirection::Down,
+            gpui_agent::SwipeDirection::Left => nsh_agent_actions::SwipeDirection::Left,
+            gpui_agent::SwipeDirection::Right => nsh_agent_actions::SwipeDirection::Right,
         };
         match target {
-            Some(target) => self
-                .agent
-                .drag_node_by(self.node_id(target)?, None, delta)?,
+            Some(target) => {
+                let id = self.node_id(target)?;
+                self.agent.swipe_node(id, direction, explicit)?;
+            }
+            // The default distance is picked inside the agent, from the same
+            // checked origin and viewport the drag itself uses.
             None => {
-                let from = Point::new(Points(width / 2.0), Points(height / 2.0));
-                self.agent.drag_at(
-                    from,
-                    Point::new(Points(from.x.0 + delta.x.0), Points(from.y.0 + delta.y.0)),
+                let viewport = self.agent.native_viewport();
+                let (width, height) = (viewport.width.0, viewport.height.0);
+                self.agent.swipe_at(
+                    Point::new(Points(width / 2.0), Points(height / 2.0)),
+                    direction,
+                    explicit,
                 )?;
             }
         }
@@ -723,6 +720,11 @@ fn ui_node(node: &SemanticNode, index: &SnapshotIndex<'_>, agent: &Agent) -> UiN
         };
     }
     result.visible = visible_in_viewport(node, index);
+    result.checked = node.states.iter().find_map(|state| match state.as_str() {
+        "checked" => Some(true),
+        "unchecked" => Some(false),
+        _ => None,
+    });
     result.states.clone_from(&node.states);
     if let Some(hint) = &node.hint {
         result.states.push(format!("hint: {hint}"));
@@ -843,15 +845,16 @@ pub fn spawn_worker(
 ) -> Result<WorkerHandle, String> {
     validate_worker_config(addr, &token)?;
     host.token_required = true;
-    let server = AgentServer::bind(addr, Some(token)).map_err(|error| error.to_string())?;
-    let local_addr = server.local_addr().map_err(|error| error.to_string())?;
-    let shutdown = server.shutdown_handle();
+    let listener = std::net::TcpListener::bind(addr).map_err(|error| error.to_string())?;
+    let local_addr = listener.local_addr().map_err(|error| error.to_string())?;
+    let shutdown = Arc::new(AtomicBool::new(false));
     let running = Arc::new(AtomicBool::new(true));
     let serving = running.clone();
+    let serve_shutdown = shutdown.clone();
     let thread = std::thread::Builder::new()
         .name("nsh-gpui-agent".into())
         .spawn(move || {
-            server.serve_host(Arc::new(Mutex::new(host)));
+            serve_worker(listener, token, Arc::new(Mutex::new(host)), serve_shutdown);
             serving.store(false, Ordering::Release);
         })
         .map_err(|error| error.to_string())?;
@@ -861,6 +864,275 @@ pub fn spawn_worker(
         shutdown,
         running,
     })
+}
+
+/// Serves `host` on `listener` the way `AgentServer::serve_host` does — the
+/// same auth challenge, one dispatch thread per connection, `Op::Shutdown`
+/// and confirmed quit handling — except shutdown also stops established
+/// connections: each connection loop re-checks the flag between requests,
+/// and the accept loop closes every live stream when it ends. gpui-agent
+/// 0.3.0's `serve_host` checks the flag only while accepting, so a client
+/// connected before a `WorkerHandle` drop kept dispatching.
+#[cfg(feature = "dev-agent")]
+fn serve_worker(
+    listener: std::net::TcpListener,
+    token: String,
+    host: Arc<Mutex<NshAgentHost>>,
+    shutdown: Arc<AtomicBool>,
+) {
+    use std::net::TcpStream;
+    use std::sync::atomic::AtomicU64;
+
+    let _published = listener.local_addr().ok().and_then(|addr| {
+        let app = host
+            .lock()
+            .map(|guard| guard.hello().app)
+            .unwrap_or_default();
+        gpui_agent::discovery::publish_current(addr, &app).ok()
+    });
+    let limits = gpui_agent::ServerLimits::default();
+    listener.set_nonblocking(true).ok();
+    let inflight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let next_connection = Arc::new(AtomicU64::new(0));
+    let live: Arc<Mutex<HashMap<u64, TcpStream>>> = Arc::new(Mutex::new(HashMap::new()));
+    while !shutdown.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                if inflight.fetch_add(1, Ordering::SeqCst) >= limits.max_connections {
+                    inflight.fetch_sub(1, Ordering::SeqCst);
+                    drop(stream);
+                    continue;
+                }
+                let connection = next_connection.fetch_add(1, Ordering::SeqCst);
+                if let Ok(clone) = stream.try_clone() {
+                    live.lock().expect("live streams").insert(connection, clone);
+                }
+                let host = host.clone();
+                let token = token.clone();
+                let shutdown = shutdown.clone();
+                let inflight = inflight.clone();
+                let live = live.clone();
+                let limits = limits.clone();
+                std::thread::spawn(move || {
+                    // The slot frees on unwind too: a panicking handler must
+                    // not pin the connection or its slot forever.
+                    struct Guard {
+                        live: Arc<Mutex<HashMap<u64, TcpStream>>>,
+                        inflight: Arc<std::sync::atomic::AtomicUsize>,
+                        connection: u64,
+                    }
+                    impl Drop for Guard {
+                        fn drop(&mut self) {
+                            self.live.lock().expect("live streams").remove(&self.connection);
+                            self.inflight.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    }
+                    let _guard = Guard { live, inflight, connection };
+                    serve_worker_stream(stream, host, &token, &shutdown, &limits);
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => break,
+        }
+    }
+    // Established connections end now rather than at their next read
+    // timeout; their threads exit as their blocked reads fail.
+    for stream in live.lock().expect("live streams").values() {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+/// One worker connection's request loop: identical to gpui-agent's
+/// `handle_stream_host` but it stops as soon as shutdown is requested.
+#[cfg(feature = "dev-agent")]
+fn serve_worker_stream(
+    stream: std::net::TcpStream,
+    host: Arc<Mutex<NshAgentHost>>,
+    token: &str,
+    shutdown: &Arc<AtomicBool>,
+    limits: &gpui_agent::ServerLimits,
+) {
+    use std::io::{BufReader, Write};
+
+    // Accepted sockets inherit nonblocking from the listener on macOS/BSD;
+    // timeouts only work on blocking sockets.
+    if stream.set_nonblocking(false).is_err() {
+        return;
+    }
+    let _ = stream.set_nodelay(true);
+    if stream.set_read_timeout(Some(limits.idle_timeout)).is_err()
+        || stream.set_write_timeout(Some(limits.idle_timeout)).is_err()
+    {
+        return;
+    }
+    let mut writer = match stream.try_clone() {
+        Ok(stream) => stream,
+        Err(_) => return,
+    };
+    let mut reader = BufReader::new(stream);
+    let mut line_buf = Vec::with_capacity(4096);
+    let mut encode_buf = Vec::with_capacity(4096);
+    let session_nonce = match gpui_agent::hmac_auth::random_nonce() {
+        Ok(nonce) => {
+            if gpui_agent::write_json_line(
+                &mut writer,
+                &mut encode_buf,
+                &gpui_agent::challenge_for_nonce(&nonce),
+            )
+            .is_err()
+                || writer.flush().is_err()
+            {
+                return;
+            }
+            Some(nonce)
+        }
+        Err(_) => return,
+    };
+    let write_response = |writer: &mut std::net::TcpStream,
+                          encode_buf: &mut Vec<u8>,
+                          resp: &gpui_agent::Response| {
+        if !resp.ok && resp.error_code.is_none() {
+            let mut coded = resp.clone();
+            coded.fill_error_code();
+            let _ = gpui_agent::write_json_line(writer, encode_buf, &coded);
+        } else {
+            let _ = gpui_agent::write_json_line(writer, encode_buf, resp);
+        }
+    };
+    let mut cache = gpui_agent::TreeCache::new();
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        match gpui_agent::read_limited_line_into(&mut reader, &mut line_buf, limits.max_line_bytes)
+        {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                write_response(
+                    &mut writer,
+                    &mut encode_buf,
+                    &gpui_agent::Response::err("?", format!("bad request: {error}")),
+                );
+                return;
+            }
+            Err(_) => return,
+        }
+        if gpui_agent::line_is_blank(&line_buf) {
+            continue;
+        }
+        let req: gpui_agent::Request = match serde_json::from_slice(&line_buf) {
+            Ok(req) => req,
+            Err(error) => {
+                write_response(
+                    &mut writer,
+                    &mut encode_buf,
+                    &gpui_agent::Response::err("?", format!("bad json: {error}")),
+                );
+                return;
+            }
+        };
+        let nonce = session_nonce.as_ref().map(|nonce| nonce.as_slice());
+        if let Err(resp) = gpui_agent::authorize_request(&req, Some(token), nonce) {
+            write_response(&mut writer, &mut encode_buf, &resp);
+            return;
+        }
+        let shutdown_op = matches!(req.op, Op::Shutdown);
+        let confirmed_quit = gpui_agent::op_is_confirmed_quit(&req.op);
+        let timeout_ms = match &req.op {
+            Op::Wait {
+                timeout_ms: Some(timeout_ms),
+            } => Some(*timeout_ms),
+            Op::WaitUntil { timeout_ms, .. } => Some(*timeout_ms),
+            _ => None,
+        };
+        let resp = if let Some(timeout_ms) = timeout_ms {
+            // Timed waits poll the way gpui-agent's own `serve_host` does: one
+            // lock per check, released between polls, so another client can
+            // change the UI this one waits on. Shutdown stops a wait too.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+            loop {
+                if shutdown.load(Ordering::SeqCst) {
+                    return;
+                }
+                let step = {
+                    let host = host.lock().expect("host");
+                    worker_wait_step(&host, &mut cache, &req, Some(token), deadline)
+                };
+                if let Some(resp) = step {
+                    break resp;
+                }
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
+            }
+        } else {
+            let mut host = host.lock().expect("host");
+            if shutdown.load(Ordering::SeqCst) {
+                return;
+            }
+            gpui_agent::handle_request_cached(&mut *host, &mut cache, req, Some(token), nonce)
+        };
+        write_response(&mut writer, &mut encode_buf, &resp);
+        if shutdown_op || (confirmed_quit && resp.ok) {
+            shutdown.store(true, Ordering::SeqCst);
+            return;
+        }
+    }
+}
+
+/// One poll of a timed `Op::Wait`/`Op::WaitUntil`, matching gpui-agent
+/// 0.3.0's `dispatch::wait_step` (which is `pub(crate)` there): `None` while
+/// the wait can still be satisfied, `Some` once it resolves or times out.
+/// Called with the host lock held for exactly one check.
+#[cfg(feature = "dev-agent")]
+fn worker_wait_step(
+    host: &NshAgentHost,
+    cache: &mut gpui_agent::TreeCache,
+    req: &gpui_agent::Request,
+    token: Option<&str>,
+    deadline: std::time::Instant,
+) -> Option<gpui_agent::Response> {
+    match &req.op {
+        Op::Wait {
+            timeout_ms: Some(_),
+        } => {
+            let mut hello = host.hello();
+            if hello.ready {
+                hello.auth = gpui_agent::HelloAuth::from_token_configured(token);
+                gpui_agent::discovery::fill_hello_identity(&mut hello);
+                let mut response = gpui_agent::Response::ok(&req.id);
+                response.hello = Some(hello);
+                Some(response)
+            } else if std::time::Instant::now() >= deadline {
+                Some(gpui_agent::Response::err(&req.id, "wait timed out"))
+            } else {
+                None
+            }
+        }
+        Op::WaitUntil { spec, .. } => {
+            let tree = cache.snapshot(host);
+            match gpui_agent::assert_tree(&tree, spec) {
+                Ok(()) => Some(gpui_agent::Response::ok(&req.id)),
+                Err(error) => {
+                    if gpui_agent::is_in_viewport_unavailable(&error)
+                        && tree.platform == PlatformKind::Headless
+                    {
+                        return Some(gpui_agent::Response::err(&req.id, error));
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Some(gpui_agent::Response::err(
+                            &req.id,
+                            format!("wait_until timed out: {error}"),
+                        ));
+                    }
+                    None
+                }
+            }
+        }
+        _ => unreachable!("worker_wait_step requires a timed wait op"),
+    }
 }
 
 /// Validates the upstream environment configuration without starting a worker.
@@ -1027,6 +1299,7 @@ mod tests {
         available: bool,
         input: Option<String>,
         viewport_unlaid: bool,
+        hit: Option<NodeId>,
         presses: Arc<std::sync::Mutex<Vec<Point<Points>>>>,
         drags: DragRecords,
     }
@@ -1037,6 +1310,7 @@ mod tests {
                 available,
                 input,
                 viewport_unlaid,
+                hit: Some(3),
                 presses: Arc::default(),
                 drags: Arc::default(),
             }
@@ -1057,7 +1331,7 @@ mod tests {
         }
 
         fn hit_at(&self, _: Point<Points>) -> Result<Option<NodeId>, String> {
-            Ok(Some(3))
+            Ok(self.hit)
         }
     }
 
@@ -1067,6 +1341,7 @@ mod tests {
                 1 => (0.0, 0.0, 100.0, 100.0),
                 2 => (80.0, 80.0, 30.0, 30.0),
                 3 => (5.0, 5.0, 10.0, 10.0),
+                5 => (0.0, 45.0, 50.0, 5.0),
                 _ => return None,
             };
             Some(Bounds::new(
@@ -1437,5 +1712,122 @@ mod tests {
         binding.label = Some("Save".into());
         binding.chord = "ctrl+s".into();
         assert!(!keybinding_info(&binding).dangerous);
+    }
+
+    #[test]
+    fn snapshot_reports_checked_states() {
+        let mut nodes = sample_nodes();
+        nodes[1].role = "checkbox".into();
+        nodes[1].states.push("unchecked".into());
+        nodes[2].role = "checkbox".into();
+        nodes[2].states.push("checked".into());
+        let host = snapshot_host(SnapshotScene(Ok(nodes), 1, Default::default()));
+
+        let snapshot = host.snapshot();
+
+        assert_eq!(snapshot.nodes[0].checked, None);
+        assert_eq!(snapshot.nodes[0].children[0].checked, Some(false));
+        assert_eq!(snapshot.nodes[0].children[1].checked, Some(true));
+    }
+
+    #[test]
+    fn mobile_swipe_default_distance_stays_inside_the_viewport() {
+        // Node 5 fills a 5pt sliver at the bottom of a 50pt viewport: an
+        // unclamped 40% default (20pt) would swipe past the screen edge.
+        let mut nodes = sample_nodes();
+        let mut sliver = SemanticNode::default();
+        sliver.id = 5;
+        sliver.parent = Some(1);
+        sliver.test_id = Some("sliver".into());
+        sliver.enabled = true;
+        nodes.push(sliver);
+        let drags: DragRecords = Arc::default();
+        let mut native = SnapshotNative::new(true, None, false);
+        native.drags = drags.clone();
+        native.hit = Some(5);
+        let agent = Arc::new(Agent::requiring_native_hit_test(
+            Arc::new(SnapshotScene(Ok(nodes), 1, Default::default())),
+            Box::new(native),
+        ));
+        let mut host = NshAgentHost::new("test", PlatformKind::Mobile, agent).unwrap();
+
+        host.dispatch(&Op::Swipe {
+            target: Some("sliver".into()),
+            direction: gpui_agent::SwipeDirection::Down,
+            distance: None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            *drags.lock().unwrap(),
+            vec![(
+                Point::new(Points(25.0), Points(47.5)),
+                Point::new(Points(25.0), Points(49.0))
+            )]
+        );
+    }
+
+    #[cfg(feature = "dev-agent")]
+    #[test]
+    fn dropping_the_worker_closes_its_connections() {
+        let host = snapshot_host(SnapshotScene(Ok(sample_nodes()), 1, Default::default()));
+        let handle = spawn_worker("127.0.0.1:0".parse().unwrap(), "token".into(), host).unwrap();
+        let mut client = gpui_agent::AgentClient::connect(handle.local_addr()).with_token("token");
+        client.call(&Op::Hello).unwrap();
+
+        drop(handle);
+
+        // The established connection stops dispatching once the worker
+        // is dropped; the next call fails instead of being served.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while client.call(&Op::Hello).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "connection keeps dispatching after the worker was dropped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(feature = "dev-agent")]
+    #[test]
+    fn a_timed_wait_does_not_block_other_clients() {
+        let host = snapshot_host(SnapshotScene(Ok(sample_nodes()), 1, Default::default()));
+        let handle = spawn_worker("127.0.0.1:0".parse().unwrap(), "token".into(), host).unwrap();
+        let addr = handle.local_addr();
+
+        // One client waits on a node that never appears: it keeps polling
+        // until its 10 s deadline.
+        let mut waiting = gpui_agent::AgentClient::connect(addr).with_token("token");
+        let waiter = std::thread::spawn(move || {
+            waiting.call(&Op::WaitUntil {
+                timeout_ms: 10_000,
+                spec: gpui_agent::AssertSpec {
+                    target: "n9999".into(),
+                    ..Default::default()
+                },
+            })
+        });
+        // Give the wait time to reach its first poll.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // A second client must be served while the first still waits: holding
+        // the host lock for the whole wait would block this call for 10 s.
+        let mut second = gpui_agent::AgentClient::connect(addr).with_token("token");
+        let started = std::time::Instant::now();
+        let hello = second.call(&Op::Hello).expect("hello dispatches");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "second client blocked behind a timed wait"
+        );
+        assert!(hello.ok, "{hello:?}");
+
+        // Dropping the worker interrupts the still-running wait.
+        drop(handle);
+        let result = waiter.join().expect("waiter thread");
+        assert!(
+            result.is_err(),
+            "timed wait kept running after drop: {result:?}"
+        );
     }
 }
