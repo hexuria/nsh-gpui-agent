@@ -1599,8 +1599,10 @@ mod tests {
     #[test]
     fn mobile_hello_lists_android_only_operations_only_on_android() {
         let hello = snapshot_host_on(PlatformKind::Mobile).hello();
+        // Paste comes from every mobile driver — the iOS driver runs on
+        // macOS, so this is not an Android-only operation.
+        assert!(hello.features.iter().any(|name| name == "paste"));
         for feature in [
-            "paste",
             "system.rotate",
             "system.keyboard_show",
             "system.keyboard_hide",
