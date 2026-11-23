@@ -34,6 +34,14 @@ fn opened(opened: &OpenedSurface<'_>) -> Option<SurfaceAttachment> {
         Ok(attachment) => attachment,
         Err(error) => {
             log::error!("cannot start GPUI agent: {error}");
+            surface.on_connected(move |client, show_error| {
+                client.log(
+                    log::Level::Error.into(),
+                    "nsh_gpui_agent",
+                    &format!("cannot start GPUI agent; continuing development without it: {error}"),
+                );
+                show_error("GPUI agent unavailable", &error);
+            });
             None
         }
     }
@@ -132,11 +140,14 @@ impl StrictNative for IosNative {
                 let Some(hit) = window.hitTest_withEvent(point, None) else {
                     return Ok(None);
                 };
+                if !mounted.is_available() {
+                    return Err("native surface is unavailable".to_owned());
+                }
                 let mut current = Some(hit);
                 while let Some(native) = current {
                     let tag = native.tag();
                     if tag >= 0
-                        && let Some(owner) = mounted(tag as NodeId)
+                        && let Some(owner) = mounted.get(tag as NodeId)
                         && std::ptr::eq::<UIView>(&*owner, &*native)
                     {
                         return Ok(Some(tag as NodeId));
