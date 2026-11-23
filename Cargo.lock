@@ -144,7 +144,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -155,7 +155,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -527,7 +527,7 @@ dependencies = [
  "maybe-owned",
  "rustix",
  "rustix-linux-procfs",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
  "winx",
 ]
 
@@ -1333,7 +1333,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2831,7 +2831,7 @@ dependencies = [
 [[package]]
 name = "nsh-base"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=70a1e8004cfdc8f4cd67c9327e12e24c6f77d929#70a1e8004cfdc8f4cd67c9327e12e24c6f77d929"
 dependencies = [
  "chrono",
  "html5ever",
@@ -2855,7 +2855,7 @@ dependencies = [
 [[package]]
 name = "nsh-bundler"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=70a1e8004cfdc8f4cd67c9327e12e24c6f77d929#70a1e8004cfdc8f4cd67c9327e12e24c6f77d929"
 dependencies = [
  "anyhow",
  "dunce",
@@ -2881,7 +2881,7 @@ dependencies = [
 [[package]]
 name = "nsh-cli"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=70a1e8004cfdc8f4cd67c9327e12e24c6f77d929#70a1e8004cfdc8f4cd67c9327e12e24c6f77d929"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2924,7 +2924,7 @@ dependencies = [
 [[package]]
 name = "nsh-core"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=70a1e8004cfdc8f4cd67c9327e12e24c6f77d929#70a1e8004cfdc8f4cd67c9327e12e24c6f77d929"
 dependencies = [
  "cap-std",
  "chrono",
@@ -2965,7 +2965,7 @@ dependencies = [
 [[package]]
 name = "nsh-dev"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=70a1e8004cfdc8f4cd67c9327e12e24c6f77d929#70a1e8004cfdc8f4cd67c9327e12e24c6f77d929"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2981,7 +2981,7 @@ dependencies = [
 [[package]]
 name = "nsh-engine"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=70a1e8004cfdc8f4cd67c9327e12e24c6f77d929#70a1e8004cfdc8f4cd67c9327e12e24c6f77d929"
 dependencies = [
  "crossbeam-channel",
  "env_filter",
@@ -3015,7 +3015,7 @@ dependencies = [
 [[package]]
 name = "nsh-i18n"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=70a1e8004cfdc8f4cd67c9327e12e24c6f77d929#70a1e8004cfdc8f4cd67c9327e12e24c6f77d929"
 dependencies = [
  "rust-i18n-support",
  "serde_json",
@@ -3024,7 +3024,7 @@ dependencies = [
 [[package]]
 name = "nsh-js"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=70a1e8004cfdc8f4cd67c9327e12e24c6f77d929#70a1e8004cfdc8f4cd67c9327e12e24c6f77d929"
 dependencies = [
  "futures-util",
  "getrandom 0.4.3",
@@ -3047,7 +3047,7 @@ dependencies = [
 [[package]]
 name = "nsh-macros"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=70a1e8004cfdc8f4cd67c9327e12e24c6f77d929#70a1e8004cfdc8f4cd67c9327e12e24c6f77d929"
 dependencies = [
  "imagesize 0.15.0",
  "proc-macro2",
@@ -3060,7 +3060,7 @@ dependencies = [
 [[package]]
 name = "nsh-package"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=70a1e8004cfdc8f4cd67c9327e12e24c6f77d929#70a1e8004cfdc8f4cd67c9327e12e24c6f77d929"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
@@ -3075,7 +3075,7 @@ dependencies = [
 [[package]]
 name = "nsh-testing"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=70a1e8004cfdc8f4cd67c9327e12e24c6f77d929#70a1e8004cfdc8f4cd67c9327e12e24c6f77d929"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -3098,7 +3098,7 @@ dependencies = [
 [[package]]
 name = "nsh-updater"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=70a1e8004cfdc8f4cd67c9327e12e24c6f77d929#70a1e8004cfdc8f4cd67c9327e12e24c6f77d929"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
@@ -3118,7 +3118,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5111,7 +5111,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5178,7 +5178,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5601,7 +5601,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6655,7 +6655,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7170,7 +7170,7 @@ dependencies = [
  "memchr",
  "nix",
  "typed-path",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
  "zeroize",
  "zopfli",
 ]
