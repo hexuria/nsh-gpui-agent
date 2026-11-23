@@ -9,6 +9,8 @@ and take screenshots, over a loopback connection the app opens only when it is t
 > platforms table says otherwise, another platform does not work from here. The plan is in
 > below. macOS's native checks pass; its end-to-end gallery replay has not run yet. Until the platforms table says
 > otherwise, a platform does not work from here. The plan is in
+> below. Windows has been run from this repository; until the platforms table says otherwise, another platform does
+> not work from here. The plan is in
 > [`hexuria/nsh`, branch `feat/nsh-agent-socket`](https://github.com/hexuria/nsh/tree/feat/nsh-agent-socket/handover/agent-socket).
 
 ## What is here
@@ -22,6 +24,7 @@ and take screenshots, over a loopback connection the app opens only when it is t
 | `crates/nsh-gpui-agent-ios` | A Simulator launcher wrapping `nsh_cli::main()`, with a private one-use token handoff. |
 | `crates/nsh-gpui-agent-macos` | The macOS surface hook, strict native driver, in-process server and opt-in `nsh-macos-host` development binary. |
 | `crates/nsh-gpui-agent-linux` | The Linux surface hook, strict native driver and opt-in `nsh-linux-host` development binary. |
+| `crates/nsh-gpui-agent-windows` | Attaches the adapter to Windows development surfaces and builds a development host with it installed. |
 
 ## Which NSH to use
 
@@ -211,6 +214,7 @@ Filled in from real runs on each platform's own machine. Headless tests on Linux
 | macOS | not run yet | |
 | Linux | Gallery action parity verified: 23/23 JSON files identical; PNG differences confined to the input caret. Build the plug's `nsh-linux-host` and select it with `NSH_RUNTIME` as above. | Ubuntu 24.04 container on Ubuntu 22.04 host, Xvfb; GTK 4.14.5 / WebKitGTK 2.52.6 |
 | Windows | not run yet | |
+| Windows | run; resize caveat below | Windows Server 2022, `hexuria/nsh` `56add34a0`, `gpui-agent-cli` 0.3.0 |
 | Android | not run yet | |
 | iOS | Simulator attachment live-verified; native regression failures remain | iPhone 17, iOS 26.5, Apple Silicon; pinned fork above |
 | Web | owned Chromium and independently opened tab: hello, snapshot, click and type; owned screenshot | Linux, Chrome for Testing 156.0.8078.47, gpui-agent-cli 0.3.0 |
@@ -317,6 +321,47 @@ part of this move. Plug tests, plug clippy (including the real Simulator target)
 and the fork's prescribed iOS Catalyst clippy command passed. Detailed command
 output and screenshots from this machine are under `~/stage1-ios/`; the
 same-Simulator comparison is under `~/stage1-ios/parity/`.
+
+### Windows
+
+The gallery was run on a real Windows Server 2022 machine with this repository's development host. The ready
+handshake, semantic snapshots, clicking a demo, typing into search and an account field, a key chord (`ctrl+a`),
+a menu keybinding (opening the Quit confirmation), resizing, native PNG screenshots and a missing-target error
+were exercised. Typing returned `delivered_verified`; the key chord returned success without a tree-visible
+selection change (`delivered_unverified`). The menu confirmation and typed form were checked in a screenshot.
+
+Resizing requested **1000×700** but produced **1000×731**. The host delegates resize to NSH's existing native
+driver; `buwiz`'s client-area correction was not moved.
+
+Build the host from `crates/nsh-gpui-agent-windows` and place it in a runtime root. From this repository, in
+PowerShell:
+
+```powershell
+cargo build -p nsh-gpui-agent-windows --bin nsh-windows-host
+$runtime = "$HOME\nsh-runtime"
+New-Item -ItemType Directory -Force "$runtime\windows" | Out-Null
+Copy-Item target\debug\nsh-windows-host.exe "$runtime\windows\nsh-windows-host.exe"
+$env:NSH_RUNTIME = $runtime
+$env:GPUI_AGENT = "1"
+$env:GPUI_AGENT_ADDR = "127.0.0.1:17421"
+$env:GPUI_AGENT_TOKEN = [guid]::NewGuid().ToString("N")
+```
+
+Then, from the `hexuria/nsh` checkout at the commit above, in the same shell:
+
+```powershell
+nsh run examples/gallery --target windows
+```
+
+`NSH_RUNTIME` selects `<root>/windows/nsh-windows-host.exe` instead of NSH's ordinary development host. The
+gallery must have no `rust` host configuration, which takes precedence over `NSH_RUNTIME`. The adapter starts
+only with `GPUI_AGENT=1`, a loopback address and a nonempty token.
+
+Install the client with `cargo install gpui-agent-cli --version =0.3.0` (the `gpui-agent` package has no binary).
+Run it in another shell with the same `GPUI_AGENT_ADDR` and `GPUI_AGENT_TOKEN`. For a screenshot saved to an
+absolute local path, use `gpui-agent screenshot --inline --out <path.png>`; without `--inline`, the output name
+must be relative to the host's screenshot directory. Native screenshots worked in this run despite the CLI help's
+generic Windows limitation.
 
 ## License
 
