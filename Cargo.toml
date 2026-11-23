@@ -25,11 +25,11 @@ jni = "0.21"
 # One NSH per build: every nsh-* crate comes from branch `gpui-agent` of the
 # fork, pinned to the tested commit (see README.md, "Which NSH to use"). An app that builds NSH from its
 # own checkout redirects these with `[patch."https://github.com/hexuria/nsh"]`.
-nsh-cli = { git = "https://github.com/hexuria/nsh", rev = "7b916cdb37acbaca8778ccdaa36bde534efa7360" }
-nsh-core = { git = "https://github.com/hexuria/nsh", rev = "7b916cdb37acbaca8778ccdaa36bde534efa7360" }
-nsh-dev = { git = "https://github.com/hexuria/nsh", rev = "7b916cdb37acbaca8778ccdaa36bde534efa7360" }
-nsh-platform-android = { git = "https://github.com/hexuria/nsh", rev = "7b916cdb37acbaca8778ccdaa36bde534efa7360", default-features = false }
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "7b916cdb37acbaca8778ccdaa36bde534efa7360", default-features = false }
+nsh-cli = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342" }
+nsh-core = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342" }
+nsh-dev = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342" }
+nsh-platform-android = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", default-features = false }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", default-features = false }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
