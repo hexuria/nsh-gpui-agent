@@ -3025,7 +3025,7 @@ dependencies = [
 [[package]]
 name = "nsh-base"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=7b916cdb37acbaca8778ccdaa36bde534efa7360#7b916cdb37acbaca8778ccdaa36bde534efa7360"
 dependencies = [
  "chrono",
  "html5ever",
@@ -3055,7 +3055,7 @@ dependencies = [
 [[package]]
 name = "nsh-bundler"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=7b916cdb37acbaca8778ccdaa36bde534efa7360#7b916cdb37acbaca8778ccdaa36bde534efa7360"
 dependencies = [
  "anyhow",
  "dunce",
@@ -3081,7 +3081,7 @@ dependencies = [
 [[package]]
 name = "nsh-cli"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=7b916cdb37acbaca8778ccdaa36bde534efa7360#7b916cdb37acbaca8778ccdaa36bde534efa7360"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3124,7 +3124,7 @@ dependencies = [
 [[package]]
 name = "nsh-core"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=7b916cdb37acbaca8778ccdaa36bde534efa7360#7b916cdb37acbaca8778ccdaa36bde534efa7360"
 dependencies = [
  "cap-std",
  "chrono",
@@ -3165,7 +3165,7 @@ dependencies = [
 [[package]]
 name = "nsh-dev"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=7b916cdb37acbaca8778ccdaa36bde534efa7360#7b916cdb37acbaca8778ccdaa36bde534efa7360"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3181,7 +3181,7 @@ dependencies = [
 [[package]]
 name = "nsh-engine"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=7b916cdb37acbaca8778ccdaa36bde534efa7360#7b916cdb37acbaca8778ccdaa36bde534efa7360"
 dependencies = [
  "block2",
  "crossbeam-channel",
@@ -3244,7 +3244,7 @@ dependencies = [
 [[package]]
 name = "nsh-i18n"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=7b916cdb37acbaca8778ccdaa36bde534efa7360#7b916cdb37acbaca8778ccdaa36bde534efa7360"
 dependencies = [
  "rust-i18n-support",
  "serde_json",
@@ -3253,7 +3253,7 @@ dependencies = [
 [[package]]
 name = "nsh-js"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=7b916cdb37acbaca8778ccdaa36bde534efa7360#7b916cdb37acbaca8778ccdaa36bde534efa7360"
 dependencies = [
  "futures-util",
  "getrandom 0.4.3",
@@ -3276,7 +3276,7 @@ dependencies = [
 [[package]]
 name = "nsh-macros"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=7b916cdb37acbaca8778ccdaa36bde534efa7360#7b916cdb37acbaca8778ccdaa36bde534efa7360"
 dependencies = [
  "imagesize 0.15.0",
  "proc-macro2",
@@ -3289,7 +3289,7 @@ dependencies = [
 [[package]]
 name = "nsh-package"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=7b916cdb37acbaca8778ccdaa36bde534efa7360#7b916cdb37acbaca8778ccdaa36bde534efa7360"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
@@ -3304,7 +3304,7 @@ dependencies = [
 [[package]]
 name = "nsh-platform-android"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=7b916cdb37acbaca8778ccdaa36bde534efa7360#7b916cdb37acbaca8778ccdaa36bde534efa7360"
 dependencies = [
  "jni 0.21.1",
  "jni 0.22.4",
@@ -3325,7 +3325,7 @@ dependencies = [
 [[package]]
 name = "nsh-testing"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=7b916cdb37acbaca8778ccdaa36bde534efa7360#7b916cdb37acbaca8778ccdaa36bde534efa7360"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -3348,7 +3348,7 @@ dependencies = [
 [[package]]
 name = "nsh-updater"
 version = "0.6.1"
-source = "git+https://github.com/hexuria/nsh?rev=6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094#6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094"
+source = "git+https://github.com/hexuria/nsh?rev=7b916cdb37acbaca8778ccdaa36bde534efa7360#7b916cdb37acbaca8778ccdaa36bde534efa7360"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",

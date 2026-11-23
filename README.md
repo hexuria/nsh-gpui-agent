@@ -4,9 +4,8 @@ Makes an app built with [Native Shell](https://github.com/longbridge/nsh) (NSH) 
 [gpui-agent](https://github.com/hexuria/gpui-agent): a client can read the app's tree of views, press, type, scroll
 and take screenshots, over a loopback connection the app opens only when it is told to.
 
-> **Status: moving.** The adapter and the agent actions are here and their headless tests pass against the commit
-> below. No platform has been run from this repository yet: until the platforms table says otherwise, a platform does
-> not work from here. The plan is in
+> **Status: moving.** The adapter and the agent actions are here, and Android has passed a live emulator run from
+> this repository. Until the platforms table says otherwise, no other platform works from here. The plan is in
 > [`hexuria/nsh`, branch `feat/nsh-agent-socket`](https://github.com/hexuria/nsh/tree/feat/nsh-agent-socket/handover/agent-socket).
 
 ## What is here
@@ -28,7 +27,7 @@ and take screenshots, over a loopback connection the app opens only when it is t
 | Branch | `gpui-agent` |
 | What it is | An upstream release of `longbridge/nsh` plus a small set of doors, and nothing else |
 | Upstream release it sits on | `v0.6.1` (`2f51d8611`) |
-| Commit this repository is tested with | [`6c24cda40`](https://github.com/hexuria/nsh/commit/6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094) |
+| Commit this repository is tested with | [`7b916cdb3`](https://github.com/hexuria/nsh/commit/7b916cdb37acbaca8778ccdaa36bde534efa7360) |
 | The doors | `SOCKET.md` at the root of that branch lists every one |
 
 A *door* is a small change that makes something in NSH public: an accessor, or a hook that calls out. A door holds
@@ -39,16 +38,39 @@ The branch is rebased onto each new upstream release, so depend on a commit, not
 
 ```toml
 [dependencies]
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "7b916cdb37acbaca8778ccdaa36bde534efa7360", default-features = false, features = ["agent"] }
 ```
 
 ## Using it from an app
 
-A build can have only one NSH. Cargo treats the same crate from two places as two different crates, so an app that
-builds NSH from its own checkout must point this repository's NSH at that same checkout:
+A build can have only one NSH. Cargo treats the same crate from two places as two different crates. The small crate
+that links a platform plug must therefore also depend directly on one NSH crate at the pinned commit; NSH's generated
+workspace reads that direct dependency to learn which NSH checkout the generated hosts must share. Use the same
+checkout for both entries:
 
 ```toml
-# the app's Cargo.toml
+# the linking crate's Cargo.toml
+[dependencies]
+# A relative path while testing this clone, or git + rev for a pinned commit.
+nsh-gpui-agent-android = { path = "../nsh-gpui-agent/crates/nsh-gpui-agent-android" }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "7b916cdb37acbaca8778ccdaa36bde534efa7360", default-features = false, features = ["agent"] }
+```
+
+Do not omit the direct `nsh-testing` dependency merely because the crate's Rust code does not name it: without a
+direct NSH dependency the generated host falls back to crates.io and its component types no longer match the plug's.
+
+An app that builds NSH from its own checkout instead of the pinned commit must make that checkout the one source in
+two places. Change the direct dependency to it:
+
+```toml
+nsh-testing = { path = "../nsh/crates/nsh-testing", default-features = false, features = ["agent"] }
+```
+
+and redirect this repository's transitive git dependencies in the application workspace's root `Cargo.toml` (a
+`[patch]` table in a dependency or non-root member is ignored):
+
+```toml
+# the application workspace root Cargo.toml
 [patch."https://github.com/hexuria/nsh"]
 nsh-cli               = { path = "../nsh/crates/nsh-cli" }
 nsh-core              = { path = "../nsh/crates/nsh-core" }
@@ -74,11 +96,31 @@ pub use nsh_gpui_agent_android::__nsh_native_module;
 "rust": "native/agent"
 ```
 
-The crate needs a Java JDK (`javac`) and the Android SDK while it builds for Android: its build script compiles the
-bridge with `javac` and `d8` (NSH's minimum SDK is 26, so the runtime uses `InMemoryDexClassLoader`). Build and run
-with the `nsh-gpui-agent` binary instead of the stock `nsh` binary. With `GPUI_AGENT=1` it requires
-`GPUI_AGENT_TOKEN` (no surrounding whitespace) and accepts a loopback `GPUI_AGENT_ADDR` (default `127.0.0.1:17421`);
-the token goes to the development host's private files over adb's standard input and is never an argument.
+The crate needs a Java JDK and the Android SDK while it builds for Android: its build script compiles the bridge with
+`javac` and `d8` (NSH's minimum SDK is 26, so the runtime uses `InMemoryDexClassLoader`). Set `JAVA_HOME` or put
+`javac` on `PATH`, and set `ANDROID_HOME` or `ANDROID_SDK_ROOT`. Without those variables the build script looks in
+`~/Android/Sdk` on Linux, `~/Library/Android/sdk` on macOS and `%LOCALAPPDATA%\\Android\\Sdk` on Windows; on Windows it
+uses `javac.exe` and runs `d8.bat` through `cmd.exe`.
+
+Build the command line once from this clone and use it instead of the stock `nsh` binary:
+
+```sh
+cargo install --path crates/nsh-gpui-agent-cli --locked
+```
+
+With `GPUI_AGENT=1` it requires `GPUI_AGENT_TOKEN` (no surrounding whitespace) and accepts a loopback
+`GPUI_AGENT_ADDR` (default `127.0.0.1:17421`); the token goes to the development host's private files over adb's
+standard input and is never an argument. On PowerShell, a run looks like:
+
+```powershell
+$env:GPUI_AGENT = "1"
+$env:GPUI_AGENT_TOKEN = "<one random token>"
+nsh-gpui-agent run --target android path\to\the\app
+adb forward tcp:17421 tcp:17421
+Remove-Item Env:GPUI_AGENT, Env:GPUI_AGENT_TOKEN
+```
+
+Use a fresh random token for each machine or run; do not commit it.
 
 ## gpui-agent version
 
