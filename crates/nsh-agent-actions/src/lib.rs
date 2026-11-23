@@ -1585,7 +1585,14 @@ impl Agent {
                                 if receivers.is_empty() {
                                     is_descendant_or_same(hit, expected, &parents)
                                 } else {
+                                    // A hold targeted at an enabled input
+                                    // owns the gesture itself (native text
+                                    // selection) even when the model picked
+                                    // a pressable ancestor as the receiver.
                                     receivers.contains(&expected)
+                                        || (target.input
+                                            && target.enabled
+                                            && receivers.contains(&target.id))
                                 }
                             } else {
                                 match self.press_receiver(
