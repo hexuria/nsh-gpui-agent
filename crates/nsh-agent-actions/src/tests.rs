@@ -1100,6 +1100,54 @@ fn a_hold_refuses_a_press_down_child_even_without_touch() {
 }
 
 #[test]
+fn a_hold_over_a_press_down_child_fails_when_the_parent_also_takes_presses() {
+    use nsh_core::{EventMask, MountItem, ViewKind};
+
+    // A card whose long-press callback is native keeps nothing when a
+    // press-down child owns the gesture: touches still reach its touch
+    // listener, but the native callback can never run.
+    let model = long_press_only_scene(false);
+    let mut events = EventMask::default();
+    events.set(EventKind::LongPress, true);
+    events.set(EventKind::Touch, true);
+    let mut press_down = EventMask::default();
+    press_down.set(EventKind::PressDown, true);
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Events { id: 2, events },
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 3,
+                frame: Bounds::new(point(px(30.0), px(40.0)), size(px(20.0), px(20.0))),
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Events {
+                id: 3,
+                events: press_down,
+            },
+        ],
+    });
+    let bounds = [(
+        2,
+        Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+    )];
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(model, Ok(Some(3)), &bounds, &[], long_presses.clone());
+
+    let error = agent.long_press_node(2, None).unwrap_err();
+
+    assert!(error.contains("occluded"), "{error}");
+    assert!(long_presses.lock().unwrap().is_empty());
+}
+
+#[test]
 fn a_hold_through_a_press_down_child_reaches_a_touch_observer() {
     use nsh_core::{EventMask, MountItem, ViewKind, ViewProps};
 
