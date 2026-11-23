@@ -21,15 +21,15 @@ gpui-agent = "=0.3.0"
 # One NSH per build: every nsh-* crate comes from branch `gpui-agent` of the
 # fork, pinned to the tested commit (see README.md, "Which NSH to use"). An app that builds NSH from its
 # own checkout redirects these with `[patch."https://github.com/hexuria/nsh"]`.
-nsh-core = { git = "https://github.com/hexuria/nsh", rev = "68a4a99ecef0f2ff57dab476ab64f86d46897600" }
-nsh-dev = { git = "https://github.com/hexuria/nsh", rev = "68a4a99ecef0f2ff57dab476ab64f86d46897600" }
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "68a4a99ecef0f2ff57dab476ab64f86d46897600", default-features = false }
-nsh-platform-ios = { git = "https://github.com/hexuria/nsh", rev = "68a4a99ecef0f2ff57dab476ab64f86d46897600", features = ["dev"] }
-nsh-ios-host = { git = "https://github.com/hexuria/nsh", rev = "68a4a99ecef0f2ff57dab476ab64f86d46897600" }
-nsh-base = { git = "https://github.com/hexuria/nsh", rev = "68a4a99ecef0f2ff57dab476ab64f86d46897600" }
+nsh-core = { git = "https://github.com/hexuria/nsh", rev = "6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094" }
+nsh-dev = { git = "https://github.com/hexuria/nsh", rev = "6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094" }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094", default-features = false }
+nsh-platform-ios = { git = "https://github.com/hexuria/nsh", rev = "6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094", features = ["dev"] }
+nsh-ios-host = { git = "https://github.com/hexuria/nsh", rev = "6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094" }
+nsh-base = { git = "https://github.com/hexuria/nsh", rev = "6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094" }
 ctrlc = { version = "3.5", features = ["termination"] }
 libc = "0.2"
-nsh-cli = { git = "https://github.com/hexuria/nsh", rev = "68a4a99ecef0f2ff57dab476ab64f86d46897600" }
+nsh-cli = { git = "https://github.com/hexuria/nsh", rev = "6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094" }
 objc2 = "0.6.5"
 objc2-core-foundation = "0.3.2"
 objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["std", "UIApplication", "UIResponder", "UIView", "UIWindow"] }

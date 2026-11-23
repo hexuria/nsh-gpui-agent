@@ -28,7 +28,7 @@ and take screenshots, over a loopback connection the app opens only when it is t
 | Branch | `gpui-agent` |
 | What it is | An upstream release of `longbridge/nsh` plus a small set of doors, and nothing else |
 | Upstream release it sits on | `v0.6.1` (`2f51d8611`) |
-| Dependency pin (iOS Simulator tested) | [`68a4a99ec`](https://github.com/hexuria/nsh/commit/68a4a99ecef0f2ff57dab476ab64f86d46897600) |
+| Dependency pin (iOS Simulator tested) | [`6c24cda40`](https://github.com/hexuria/nsh/commit/6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094) |
 | Last Stage 0 headless test run | [`b609258a5`](https://github.com/hexuria/nsh/commit/b609258a57ff1e8eefae34a7733f69bfca5fda0c) |
 | The doors | `SOCKET.md` at the root of that branch lists every one |
 
@@ -40,7 +40,7 @@ The branch is rebased onto each new upstream release, so depend on a commit, not
 
 ```toml
 [dependencies]
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "68a4a99ecef0f2ff57dab476ab64f86d46897600", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094", default-features = false, features = ["agent"] }
 ```
 
 ## Using it from an app
@@ -95,10 +95,13 @@ confined to `Library/Caches/gpui-agent`; use `screenshot --inline` to save on th
 For a TSX app using the base registries, build the supplied host and launcher:
 
 ```sh
+rustup show active-toolchain
+rustup target add aarch64-apple-ios-sim
 cargo build --locked -p nsh-gpui-agent-ios-host --target aarch64-apple-ios-sim
 cargo build --locked -p nsh-gpui-agent-ios
 mkdir -p "$HOME/.nsh-agent-runtime/ios/iphonesimulator"
 cp target/aarch64-apple-ios-sim/debug/nsh-ios-host "$HOME/.nsh-agent-runtime/ios/iphonesimulator/"
+cmp target/aarch64-apple-ios-sim/debug/nsh-ios-host "$HOME/.nsh-agent-runtime/ios/iphonesimulator/nsh-ios-host"
 export GPUI_AGENT_TOKEN="$(openssl rand -hex 32)" GPUI_AGENT_ADDR=127.0.0.1:17421
 GPUI_AGENT=1 target/debug/nsh-gpui-agent-ios \
   --runtime "$HOME/.nsh-agent-runtime" --device SIMULATOR_UDID \
@@ -107,8 +110,27 @@ GPUI_AGENT=1 target/debug/nsh-gpui-agent-ios \
 
 Use a booted Simulator's UDID (`xcrun simctl list devices booted`). Run the
 matching **gpui-agent 0.3.0 CLI** in another terminal with the same address and
-token. The older preinstalled CLI may lack `screenshot --inline`, `scroll`, and
-the other first-class operations; `invoke scroll` works with that older CLI.
+token. Install it into a dedicated directory and use that directory's binary:
+
+```sh
+cargo install gpui-agent-cli --version "=0.3.0" --root "$HOME/.gpui-agent-0.3.0"
+export PATH="$HOME/.gpui-agent-0.3.0/bin:$PATH"
+```
+
+Older preinstalled CLIs can lack `press`, `scroll`, `long-press`, and
+`screenshot --inline`; use the matching CLI rather than an older one on `PATH`.
+Install the Simulator target on the **toolchain actually used by the build**:
+run the target command above from this checkout, or specify the same toolchain
+explicitly with `rustup target add --toolchain stable aarch64-apple-ios-sim`
+and `cargo +stable build …`. The external buwiz-forms `scripts/setup-macos.sh`
+runs its target installation under that app's Rust 1.99.0 override; it does not
+also install the target into a separate `stable` toolchain. Building with
+another toolchain without its target produces E0463 (`can't find crate for std`).
+If `CARGO_TARGET_DIR` is set, use its build-output path instead of `target/`.
+**After every host rebuild, repeat the copy and `cmp` above**: the launcher loads
+`ios/iphonesimulator/nsh-ios-host` from `--runtime`, not directly from Cargo's
+output. `cmp` must exit zero (and print nothing) before launching.
+
 Bare `GPUI_AGENT=1 nsh run` still uses the stock host and does not link this plug.
 Rust UI-set apps must link and install the plug in their own host registration;
 the supplied base-only host does not add their crates to a generated host.
@@ -133,6 +155,14 @@ keybindings on either host; its Button page exposes `alt-cmd-f`, which toggles
 favorites on both. Before the first bundle mounts, a live coordinate press
 returns exactly `native surface is unavailable` on both. Phones do not
 advertise hover or viewport resizing.
+
+Semantic IDs can go stale across navigation: after a click navigates, take a fresh
+snapshot before choosing the next ID, or a stale ID can return `target_gone`. Offscreen
+nodes, including duplicate header rows with zero-size bounds, can fail `press`
+with `offscreen (it has no native view)`; choose the on-screen ID with visible
+bounds. The gallery persists its last-open demo across launcher runs, so it can
+reopen on Input rather than the index. Navigate to the intended page before
+comparing snapshot node counts; a restored demo is not the initial gallery page.
 
 The observer receives the same `Model::engine_started` notification as on
 `buwiz`, so its mounted scene includes the whole page rather than only the
