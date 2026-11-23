@@ -1,0 +1,25 @@
+[package]
+name = "nsh-gpui-agent-android"
+description = "Android platform support for GPUI-agent on Native Shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+nsh-core.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+ctor.workspace = true
+jni.workspace = true
+log.workspace = true
+nsh-agent-actions.workspace = true
+nsh-gpui-agent = { workspace = true, features = ["dev-agent"] }
+nsh-platform-android = { workspace = true, default-features = false, features = ["dev"] }
+nsh-testing = { workspace = true, features = ["agent"] }

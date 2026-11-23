@@ -14,6 +14,7 @@ workspace = true
 [features]
 default = []
 dev-agent = []
+ios = ["dev-agent", "dep:nsh-platform-ios", "dep:objc2", "dep:objc2-core-foundation", "dep:objc2-ui-kit"]
 
 [dependencies]
 gpui-agent.workspace = true
@@ -21,6 +22,13 @@ nsh-agent-actions.workspace = true
 nsh-core.workspace = true
 nsh-testing = { workspace = true, features = ["agent"] }
 serde_json.workspace = true
+log.workspace = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+nsh-platform-ios = { workspace = true, optional = true }
+objc2 = { workspace = true, optional = true }
+objc2-core-foundation = { workspace = true, optional = true }
+objc2-ui-kit = { workspace = true, optional = true }
 
 [dev-dependencies]
 nsh-dev.workspace = true

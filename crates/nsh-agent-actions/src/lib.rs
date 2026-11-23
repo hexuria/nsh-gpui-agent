@@ -22,6 +22,7 @@ use nsh_testing::{
 };
 
 mod failure;
+mod screen_data;
 mod semantic;
 #[cfg(test)]
 mod tests;
@@ -44,6 +45,23 @@ const SCROLLS_INTO_VIEW: usize = 100;
 pub const NATIVE_HIT_TEST_UNSUPPORTED: &str = "native hit-testing is unsupported";
 /// Error returned by platforms that cannot focus a node without a press.
 pub const NATIVE_FOCUS_UNSUPPORTED: &str = "native focus is unsupported on this platform";
+/// Error returned by platforms that cannot fire a keymap binding by
+/// identity (only by chord, which a shared chord makes ambiguous).
+pub const NATIVE_KEYBINDING_UNSUPPORTED: &str =
+    "native keybinding dispatch is unsupported on this platform";
+
+/// A swipe's direction on the surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwipeDirection {
+    /// Towards the top edge.
+    Up,
+    /// Towards the bottom edge.
+    Down,
+    /// Towards the left edge.
+    Left,
+    /// Towards the right edge.
+    Right,
+}
 
 /// The native destination represented by a semantic node.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -105,6 +123,12 @@ pub struct SemanticNode {
     pub scroll: bool,
     /// Whether this node handles press events.
     pub pressable: bool,
+    /// Whether this node handles long-press events.
+    #[serde(default)]
+    pub long_press: bool,
+    /// Whether this node observes raw touch events.
+    #[serde(default)]
+    pub touch: bool,
     /// The node's accessibility states.
     pub states: Vec<String>,
     /// The native view or precise native region represented by this node.
@@ -120,6 +144,16 @@ pub struct SemanticNode {
     /// innermost hidden view around it that takes presses).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_press_owners: Vec<(NodeId, NodeId)>,
+    /// Those of [`SemanticNode::hidden_descendants`] a long press goes
+    /// to a hidden view of their own: each with that view (itself, or
+    /// the innermost hidden view around it that takes holds).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_hold_owners: Vec<(NodeId, NodeId)>,
+    /// The link spans of hidden text views under this node, as
+    /// `(link, text view, start, end)`: a native hit reports the text
+    /// view while the gesture can belong to the link at the point.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_text_spans: Vec<(NodeId, NodeId, u32, u32)>,
 }
 
 /// A keyboard shortcut the host can fire through its native input path.
@@ -137,6 +171,19 @@ pub struct SemanticKeybinding {
     /// The menu action's stable identifier, when this comes from a menu.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub menu_action_id: Option<u32>,
+}
+
+impl SemanticKeybinding {
+    /// The numeric keymap binding id the semantic id carries
+    /// (`keymap.<id>.<chord>`): `None` for a menu binding.
+    pub fn keymap_id(&self) -> Option<u32> {
+        self.id
+            .strip_prefix("keymap.")?
+            .split('.')
+            .next()?
+            .parse()
+            .ok()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -171,6 +218,25 @@ pub trait SemanticScene: Scene {
         let _ = id;
         Ok(false)
     }
+    /// The view the platform hands the long press of a hold starting on
+    /// `id`: `pick_press`'s `long_node` when set, else the picked
+    /// press's `node`. GPUI's pick gives the press to the innermost
+    /// enabled view listening to `Press`, `LongPress`, `PressDown` or
+    /// `PressUp`; when that view listens only to `LongPress`, taps fall
+    /// to the nearest tap-listening ancestor while the long press stays
+    /// with it — this method returns that view, not the tap owner, so
+    /// the answer can differ from both the model's tap pick and its hold
+    /// pick. It can also name a blocker rather than a handler: a view
+    /// listening only for press-down/up takes the press yet never fires
+    /// a long-press. A view that only observes raw touches is no
+    /// recognizer — the hold still reaches an ancestor's — so it does
+    /// not appear here. `Err` means the host cannot say: the agent
+    /// falls back to the model's long-press pick, which counts touch
+    /// listeners.
+    fn native_hold_receiver(&self, id: NodeId) -> Result<Option<NodeId>, String> {
+        let _ = id;
+        Err("the host does not report native hold receivers".into())
+    }
 }
 
 /// What the agent needs of a platform beyond [`Native`]: proof of what is
@@ -199,6 +265,14 @@ pub trait StrictNative: Native {
     /// Fires a menu shortcut through the platform's native action.
     fn fire_menu_keybinding(&self, binding: &SemanticKeybinding) -> Result<(), String> {
         self.press_keys(&binding.chord)
+    }
+    /// Fires a keymap binding by identity, so a chord another binding also
+    /// claims still runs this command and no other. Platforms that can only
+    /// send the chord return `Err(NATIVE_KEYBINDING_UNSUPPORTED)`; the
+    /// agent refuses an ambiguous chord rather than firing the wrong one.
+    fn fire_keybinding(&self, binding: &SemanticKeybinding) -> Result<(), String> {
+        let _ = binding;
+        Err(NATIVE_KEYBINDING_UNSUPPORTED.into())
     }
     /// Whether the app currently has native window focus.
     fn app_focused(&self) -> bool {
@@ -302,6 +376,37 @@ fn intersection(left: Bounds<Points>, right: Bounds<Points>) -> Option<Bounds<Po
             Size::new(Points(x1 - x0), Points(y1 - y0)),
         )
     })
+}
+
+/// Two chord strings name the same shortcut when their parts match after
+/// folding case and common key-name aliases — catalogue spellings like
+/// `ctrl+escape` and `⌃⎋` would otherwise look like different chords and
+/// let a shared one go out as plain keys.
+fn normalize_chord(chord: &str) -> Vec<String> {
+    let mut parts: Vec<String> = chord
+        .split(['+', '-'])
+        .map(|part| {
+            let part = part.trim().to_lowercase();
+            match part.as_str() {
+                "esc" | "⎋" => "escape".to_string(),
+                "cmd" | "command" | "⌘" | "super" | "win" | "windows" => "meta".to_string(),
+                "ctl" | "control" | "⌃" => "ctrl".to_string(),
+                "opt" | "option" | "⌥" => "alt".to_string(),
+                "⇧" => "shift".to_string(),
+                "return" | "↵" | "⏎" => "enter".to_string(),
+                "del" => "delete".to_string(),
+                "spacebar" | "␣" => "space".to_string(),
+                // The menu catalogue's key labels spell these short.
+                "pageup" => "pgup".to_string(),
+                "pagedown" => "pgdn".to_string(),
+                "insert" => "ins".to_string(),
+                _ => part,
+            }
+        })
+        .filter(|part| !part.is_empty())
+        .collect();
+    parts.sort();
+    parts
 }
 
 /// What a press on `target` goes to: itself when it is an input or
@@ -540,6 +645,7 @@ impl Agent {
             &selector,
             Some(owner),
             false,
+            false,
         )?;
         self.native.press(at);
         self.settled()
@@ -646,24 +752,48 @@ impl Agent {
     }
 
     /// Fires a catalogued shortcut using the platform's native dispatch.
+    /// A chord another binding also claims can only be sent when the
+    /// platform fires bindings by identity: a plain chord could dispatch
+    /// to that other command.
     pub fn fire_keybinding(&self, binding: &str) -> Result<(), String> {
         self.settled()?;
-        let entry = self
-            .scene
-            .keybindings()?
-            .into_iter()
+        let bindings = self.scene.keybindings()?;
+        let entry = bindings
+            .iter()
             .find(|entry| entry.id == binding)
             .ok_or_else(|| format!("unknown binding `{binding}`"))?;
         if entry.menu_path.is_some() {
-            self.native.fire_menu_keybinding(&entry)?;
+            self.native.fire_menu_keybinding(entry)?;
+        } else if bindings.iter().any(|other| {
+            other.id != entry.id && normalize_chord(&other.chord) == normalize_chord(&entry.chord)
+        }) {
+            self.native.fire_keybinding(entry)?;
         } else {
             self.native.press_keys(&entry.chord)?;
         }
         self.settled()
     }
 
-    /// Scrolls the native content at semantic node `id`.
+    /// Scrolls the native content at semantic node `id`, refusing a
+    /// locked scroller: native wheel routing would skip it and move an
+    /// eligible ancestor instead of the named view.
     pub fn scroll_node(&self, id: NodeId, delta: Point<Points>) -> Result<(), String> {
+        match self
+            .scene
+            .pick(&format!("view:{id}"), PickTarget::ScrollView)?
+        {
+            Pick::One(receiver) if receiver == id => {}
+            Pick::One(receiver) => {
+                return Err(format!(
+                    "`view:{id}` does not scroll (`view:{receiver}` would take its scrolls)"
+                ));
+            }
+            Pick::Disabled => {
+                return Err(format!("`view:{id}` is a scroll view that does not scroll"));
+            }
+            Pick::Many(n) => return Err(format!("`view:{id}` matches {n} scroll views")),
+            Pick::None => {}
+        }
         let at = self.node_point(id)?;
         self.native.scroll(at, delta);
         self.settled()
@@ -700,6 +830,82 @@ impl Agent {
     /// Drags from a checked native point to an on-screen point.
     pub fn drag_at(&self, from: Point<Points>, to: Point<Points>) -> Result<(), String> {
         let (_, from) = self.checked_point_target(from, PointActionability::Any)?;
+        // The caller's absolute endpoint stays exact; a delta round-trip
+        // could round it onto the viewport edge and fail the check.
+        self.drag_checked(from, to)
+    }
+
+    /// Drags a checked node `id` `distance` points in `direction`: the
+    /// default, 40% of the viewport, only as far as fits from the checked
+    /// origin.
+    pub fn swipe_node(
+        &self,
+        id: NodeId,
+        direction: SwipeDirection,
+        distance: Option<f32>,
+    ) -> Result<(), String> {
+        let selector = format!("node {id}");
+        let _ = self.node_point(id)?;
+        self.settled()?;
+        let origin = self.node_point_without_reveal(id, &selector)?;
+        let delta = self.swipe_delta(origin, direction, distance)?;
+        self.drag_checked(origin, origin + delta)
+    }
+
+    /// [`Agent::swipe_node`] for a swipe starting at coordinate `from`.
+    pub fn swipe_at(
+        &self,
+        from: Point<Points>,
+        direction: SwipeDirection,
+        distance: Option<f32>,
+    ) -> Result<(), String> {
+        let (_, origin) = self.checked_point_target(from, PointActionability::Any)?;
+        let delta = self.swipe_delta(origin, direction, distance)?;
+        self.drag_checked(origin, origin + delta)
+    }
+
+    /// The swipe's displacement: `distance` when given, else 40% of the
+    /// viewport clamped to the room `origin` leaves in `direction`, so the
+    /// endpoint stays inside the surface.
+    fn swipe_delta(
+        &self,
+        origin: Point<Points>,
+        direction: SwipeDirection,
+        distance: Option<f32>,
+    ) -> Result<Point<Points>, String> {
+        let viewport = self.native.viewport();
+        let (width, height) = (viewport.width.0, viewport.height.0);
+        let horizontal = matches!(direction, SwipeDirection::Left | SwipeDirection::Right);
+        let distance = match distance {
+            Some(distance) if distance.is_finite() && distance > 0.0 => distance,
+            Some(_) => return Err("swipe distance must be finite and positive".into()),
+            None => {
+                let base = (if horizontal { width } else { height }) * 0.4;
+                // One point shy of the edge: the endpoint must stay inside
+                // the surface even when `origin` nearly touches it.
+                let room = match direction {
+                    SwipeDirection::Up => origin.y.0,
+                    SwipeDirection::Down => height - origin.y.0,
+                    SwipeDirection::Left => origin.x.0,
+                    SwipeDirection::Right => width - origin.x.0,
+                } - 1.0;
+                if room <= 0.0 {
+                    return Err("no room to swipe: the edge is already at hand".into());
+                }
+                base.min(room)
+            }
+        };
+        Ok(match direction {
+            SwipeDirection::Up => Point::new(Points(0.0), Points(-distance)),
+            SwipeDirection::Down => Point::new(Points(0.0), Points(distance)),
+            SwipeDirection::Left => Point::new(Points(-distance), Points(0.0)),
+            SwipeDirection::Right => Point::new(Points(distance), Points(0.0)),
+        })
+    }
+
+    /// Drags from `origin` to `to`, refusing an offscreen or
+    /// untargetable destination.
+    fn drag_checked(&self, origin: Point<Points>, to: Point<Points>) -> Result<(), String> {
         let viewport = self.native.viewport();
         if to.x.0 < 0.0 || to.y.0 < 0.0 || to.x.0 >= viewport.width.0 || to.y.0 >= viewport.height.0
         {
@@ -708,7 +914,7 @@ impl Agent {
         if self.native.hit_at(to)?.is_none() {
             return Err("drag destination is offscreen or unavailable".into());
         }
-        self.native.drag(from, to);
+        self.native.drag(origin, to);
         self.settled()
     }
 
@@ -762,37 +968,35 @@ impl Agent {
         delta: Point<Points>,
     ) -> Result<(), String> {
         let selector = format!("node {id}");
-        let _ = self.node_point(id)?;
-        self.settled()?;
         let origin = match from {
             Some(from) => {
+                // The client picked the origin: check it against the node's
+                // visible bounds and the native hit, without first requiring
+                // a hit at the node's own point (something may cover its
+                // middle while its edge stays draggable).
+                self.settled()?;
+                self.target_node_window(id)?;
                 let node = self
                     .scene
                     .semantic_tree()?
                     .into_iter()
                     .find(|node| node.id == id)
                     .ok_or_else(|| format!("`{selector}` is offscreen (node unavailable)"))?;
+                if !node.enabled {
+                    return Err(format!("`{selector}` is disabled"));
+                }
                 let geometry = self
                     .target_geometry(&node)
                     .ok_or_else(|| format!("`{selector}` is offscreen (no native bounds)"))?;
                 self.explicit_actionable_point(id, geometry.owner, from, &selector)?
             }
-            None => self.node_point_without_reveal(id, &selector)?,
+            None => {
+                let _ = self.node_point(id)?;
+                self.settled()?;
+                self.node_point_without_reveal(id, &selector)?
+            }
         };
-        let to = Point::new(
-            Points(origin.x.0 + delta.x.0),
-            Points(origin.y.0 + delta.y.0),
-        );
-        let viewport = self.native.viewport();
-        if to.x.0 < 0.0 || to.y.0 < 0.0 || to.x.0 >= viewport.width.0 || to.y.0 >= viewport.height.0
-        {
-            return Err("drag destination is offscreen".into());
-        }
-        if self.native.hit_at(to)?.is_none() {
-            return Err("drag destination is offscreen or unavailable".into());
-        }
-        self.native.drag(origin, to);
-        self.settled()
+        self.drag_checked(origin, origin + delta)
     }
 
     /// Resizes the native content viewport, rejecting invalid dimensions.
@@ -835,14 +1039,72 @@ impl Agent {
             .hit_at(at)?
             .ok_or("offscreen: coordinate has no native target")?;
         let nodes = self.scene.semantic_tree()?;
-        let node = nodes
-            .iter()
-            .find(|node| node.id == id)
-            .ok_or("target_gone: coordinate has no semantic target")?;
+        let node = match nodes.iter().find(|node| node.id == id) {
+            Some(node) => node,
+            // A decorative accessibility-hidden view resolves to the
+            // semantic node it is under: the point is inside that node too.
+            // A hidden view that takes presses itself keeps its press.
+            None => {
+                let owner = nodes
+                    .iter()
+                    .find(|node| node.hidden_descendants.contains(&id))
+                    .ok_or("target_gone: coordinate has no semantic target")?;
+                let (gesture, owners) = match actionability {
+                    PointActionability::Press => ("press", owner.hidden_press_owners.clone()),
+                    // A hold's release is still a press: a hidden view
+                    // hearing either gesture intercepts the hold, its own
+                    // hold owner first when it listens for both.
+                    PointActionability::LongPress => (
+                        "hold",
+                        owner
+                            .hidden_hold_owners
+                            .iter()
+                            .chain(&owner.hidden_press_owners)
+                            .copied()
+                            .collect(),
+                    ),
+                    PointActionability::Any => ("press", owner.hidden_press_owners.clone()),
+                };
+                let receiver = owners
+                    .iter()
+                    .find(|(hidden, _)| *hidden == id)
+                    .map(|(_, receiver)| *receiver)
+                    .or_else(|| {
+                        // A hit on a hidden text view reports the text
+                        // view; the gesture can belong to its link.
+                        owner
+                            .hidden_text_spans
+                            .iter()
+                            .find(|(_, text, start, end)| {
+                                *text == id
+                                    && self
+                                        .native
+                                        .text_bounds(*text, *start, *end)
+                                        .is_some_and(|bounds| bounds.contains(&at))
+                            })
+                            .and_then(|(link, ..)| {
+                                owners
+                                    .iter()
+                                    .find(|(hidden, _)| hidden == link)
+                                    .map(|(_, receiver)| *receiver)
+                            })
+                    });
+                if !matches!(actionability, PointActionability::Any)
+                    && let Some(receiver) = receiver
+                {
+                    return Err(format!(
+                        "node {id} is accessibility-hidden: a {gesture} at ({}, {}) goes to \
+                         node {receiver}, not to node {}",
+                        at.x.0, at.y.0, owner.id
+                    ));
+                }
+                owner
+            }
+        };
         if !node.enabled {
             return Err(format!("node {id} is disabled"));
         }
-        let mut target = id;
+        let mut target = node.id;
         let action_target = match actionability {
             PointActionability::Any => id,
             PointActionability::Press => {
@@ -863,26 +1125,28 @@ impl Agent {
             }
             PointActionability::LongPress => {
                 let selector = format!("view:{id}");
-                match self.long_pressable(id)? {
-                    Pick::One(receiver) => receiver,
-                    Pick::None => {
-                        if let Some(input) = press_owner(&nodes, node).filter(|owner| {
-                            nodes.iter().any(|candidate| {
-                                candidate.id == *owner && candidate.input && candidate.enabled
-                            })
-                        }) {
-                            target = input;
-                            input
-                        } else if let Some((span, receiver)) =
-                            self.long_pressable_span_at(&nodes, id, at)?
-                        {
-                            target = span;
-                            receiver
-                        } else {
-                            self.picked(Pick::None, &selector, "pressable view")?
+                // A hold on a link inside pressable text goes to the
+                // span's receiver, as a tap would.
+                if let Some((span, receiver)) = self.long_pressable_span_at(&nodes, id, at)? {
+                    target = span;
+                    receiver
+                } else {
+                    match self.long_pressable(id)? {
+                        Pick::One(receiver) => receiver,
+                        Pick::None => {
+                            if let Some(input) = press_owner(&nodes, node).filter(|owner| {
+                                nodes.iter().any(|candidate| {
+                                    candidate.id == *owner && candidate.input && candidate.enabled
+                                })
+                            }) {
+                                target = input;
+                                input
+                            } else {
+                                self.picked(Pick::None, &selector, "pressable view")?
+                            }
                         }
+                        pick => self.picked(pick, &selector, "pressable view")?,
                     }
-                    pick => self.picked(pick, &selector, "pressable view")?,
                 }
             }
         };
@@ -906,6 +1170,7 @@ impl Agent {
                 &selector,
                 Some(action_target),
                 true,
+                true,
             )?
         } else {
             self.explicit_actionable_point(target, id, at, &selector)?
@@ -915,21 +1180,212 @@ impl Agent {
 
     /// The pressable span of text view `text` whose characters are at
     /// `at` (on their first line, as [`Native::text_bounds`] gives them).
+    /// Nested links can share the point: the innermost wins, as GPUI
+    /// delivers the press to it.
     fn pressable_span_at<'a>(
         &self,
         nodes: &'a [SemanticNode],
         text: NodeId,
         at: Point<Points>,
     ) -> Option<&'a SemanticNode> {
-        nodes.iter().find(|node| {
-            node.pressable
-                && matches!(node.native_target, SemanticTarget::Text { owner, start, end }
+        self.span_at(nodes, text, at, |node| node.pressable)
+    }
+
+    /// [`Agent::pressable_span_at`] matching spans that can take a hold —
+    /// a link listening only for long presses still owns the gesture.
+    fn holdable_span_at<'a>(
+        &self,
+        nodes: &'a [SemanticNode],
+        text: NodeId,
+        at: Point<Points>,
+    ) -> Option<&'a SemanticNode> {
+        self.span_at(nodes, text, at, |node| node.pressable || node.long_press)
+    }
+
+    /// The innermost span of text view `text` matching `hears` whose
+    /// characters are at `at`: the smallest matching range wins, as
+    /// `link_at` resolves it, with ties going to the span mounted first.
+    fn span_at<'a>(
+        &self,
+        nodes: &'a [SemanticNode],
+        text: NodeId,
+        at: Point<Points>,
+        hears: impl Fn(&SemanticNode) -> bool,
+    ) -> Option<&'a SemanticNode> {
+        nodes
+            .iter()
+            .filter(|node| {
+                hears(node)
+                    && matches!(node.native_target, SemanticTarget::Text { owner, start, end }
                     if owner == text
                         && self
                             .native
                             .text_bounds(owner, start, end)
                             .is_some_and(|bounds| bounds.contains(&at)))
-        })
+            })
+            .min_by_key(|node| match node.native_target {
+                SemanticTarget::Text { start, end, .. } => end - start,
+                _ => 0,
+            })
+    }
+
+    /// The hidden view a gesture on hidden hit `hit` goes to: `hit`
+    /// itself when `owners` names it, else the hidden link span of a
+    /// hidden text hit at `at` — the native hit reports the text view
+    /// while the gesture belongs to the link.
+    fn hidden_owner_at(
+        &self,
+        nodes: &[SemanticNode],
+        owners: &std::collections::HashMap<NodeId, NodeId>,
+        hit: NodeId,
+        at: Point<Points>,
+    ) -> Option<NodeId> {
+        if let Some(&receiver) = owners.get(&hit) {
+            return Some(receiver);
+        }
+        nodes
+            .iter()
+            .flat_map(|node| node.hidden_text_spans.iter())
+            .find(|(_, text, start, end)| {
+                *text == hit
+                    && self
+                        .native
+                        .text_bounds(*text, *start, *end)
+                        .is_some_and(|bounds| bounds.contains(&at))
+            })
+            .and_then(|(link, ..)| owners.get(link))
+            .copied()
+    }
+
+    /// The view a press at `at` (which natively hit `hit`) goes to: the
+    /// innermost listener the platform picks — a pressable span under the
+    /// point on a text view, a pressable view itself, or the nearest
+    /// pressable ancestor — `None` when nothing takes the press. A hidden
+    /// view resolves through its recorded press owner or its semantic
+    /// owner's receiver.
+    fn press_receiver(
+        &self,
+        nodes: &[SemanticNode],
+        by_id: &std::collections::HashMap<NodeId, &SemanticNode>,
+        parents: &std::collections::HashMap<NodeId, Option<NodeId>>,
+        hidden_press_owners: &std::collections::HashMap<NodeId, NodeId>,
+        hit: NodeId,
+        at: Point<Points>,
+    ) -> Option<NodeId> {
+        if let Some(receiver) = self.hidden_owner_at(nodes, hidden_press_owners, hit, at) {
+            return Some(receiver);
+        }
+        if let Some(node) = by_id.get(&hit).copied() {
+            if let Some(span) = self.pressable_span_at(nodes, hit, at) {
+                return Some(span.id);
+            }
+            return press_owner(nodes, node);
+        }
+        // A decorative hidden view: its press goes where its semantic
+        // owner's would.
+        let mut current = parents.get(&hit).copied().flatten();
+        while let Some(id) = current {
+            if let Some(&receiver) = hidden_press_owners.get(&id) {
+                return Some(receiver);
+            }
+            if let Some(node) = by_id.get(&id) {
+                return press_owner(nodes, node);
+            }
+            current = parents.get(&id).copied().flatten();
+        }
+        None
+    }
+
+    /// [`Agent::press_receiver`] for a hold: every receiver a long press
+    /// starting at `at` can reach — the model's pick (it counts raw touch
+    /// listeners, an app may hold from touches) and the platform's
+    /// recognizer receiver (a touch observer does not own a hold).
+    fn hold_receivers(
+        &self,
+        nodes: &[SemanticNode],
+        by_id: &std::collections::HashMap<NodeId, &SemanticNode>,
+        parents: &std::collections::HashMap<NodeId, Option<NodeId>>,
+        hidden_hold_owners: &std::collections::HashMap<NodeId, NodeId>,
+        hit: NodeId,
+        at: Point<Points>,
+    ) -> Vec<NodeId> {
+        if let Some(receiver) = self.hidden_owner_at(nodes, hidden_hold_owners, hit, at) {
+            return vec![receiver];
+        }
+        if let Some(node) = by_id.get(&hit).copied() {
+            if let Ok(Some((_, receiver))) = self.long_pressable_span_at(nodes, hit, at) {
+                return vec![receiver];
+            }
+            return self.hold_owners(nodes, node, parents);
+        }
+        // A decorative hidden view: its hold goes where its semantic
+        // owner's would.
+        let mut current = parents.get(&hit).copied().flatten();
+        while let Some(id) = current {
+            if let Some(&receiver) = hidden_hold_owners.get(&id) {
+                return vec![receiver];
+            }
+            if let Some(node) = by_id.get(&id) {
+                return self.hold_owners(nodes, node, parents);
+            }
+            current = parents.get(&id).copied().flatten();
+        }
+        Vec::new()
+    }
+
+    /// What a hold on `target` can go to: an enabled input itself (native
+    /// text selection keeps the hold even under an ancestor's recognizer,
+    /// while a hold handler on the input names it the receiver either
+    /// way), else every receiver the gesture can reach — the model's
+    /// long-press pick and the native recognizer's. An empty list means
+    /// nothing takes the hold.
+    fn hold_owners(
+        &self,
+        nodes: &[SemanticNode],
+        target: &SemanticNode,
+        parents: &std::collections::HashMap<NodeId, Option<NodeId>>,
+    ) -> Vec<NodeId> {
+        let mut current = Some(target.id);
+        while let Some(id) = current {
+            let Some(node) = nodes.iter().find(|node| node.id == id) else {
+                break;
+            };
+            if node.input && node.enabled {
+                return vec![node.id];
+            }
+            let mut receivers = Vec::new();
+            let native = self.scene.native_hold_receiver(id).ok().flatten();
+            if let Some(receiver) = native {
+                receivers.push(receiver);
+            }
+            if let Ok(Pick::One(receiver)) = self.long_pressable(id)
+                && !receivers.contains(&receiver)
+            {
+                // The model pick counts raw touch listeners, and a
+                // touch-driven hold still reaches one over a
+                // press-down/up-only child: touches follow GPUI's raw
+                // touch path beside the press recognizers. That fallback
+                // holds only when the pick is touch-only — a picked
+                // ancestor that also owns a native press callback needs
+                // its recognizer, so it counts just at or below the
+                // native receiver.
+                let touch_only = nodes
+                    .iter()
+                    .find(|node| node.id == receiver)
+                    .is_some_and(|node| node.touch)
+                    && self.scene.native_hold_receiver(receiver).ok().flatten() != Some(receiver);
+                if touch_only
+                    || native.is_none_or(|native| is_descendant_or_same(receiver, native, parents))
+                {
+                    receivers.push(receiver);
+                }
+            }
+            if !receivers.is_empty() {
+                return receivers;
+            }
+            current = node.parent;
+        }
+        Vec::new()
     }
 
     fn long_pressable_span_at(
@@ -938,7 +1394,7 @@ impl Agent {
         text: NodeId,
         at: Point<Points>,
     ) -> Result<Option<(NodeId, NodeId)>, String> {
-        let Some(span) = self.pressable_span_at(nodes, text, at) else {
+        let Some(span) = self.holdable_span_at(nodes, text, at) else {
             return Ok(None);
         };
         if !span.enabled {
@@ -1061,7 +1517,15 @@ impl Agent {
         fallback: Point<Points>,
         selector: &str,
     ) -> Result<Point<Points>, String> {
-        self.actionable_point_with_press_owner(id, native_owner, fallback, selector, None, false)
+        self.actionable_point_with_press_owner(
+            id,
+            native_owner,
+            fallback,
+            selector,
+            None,
+            false,
+            false,
+        )
     }
 
     /// [`Agent::actionable_point`] for a point the caller chose: outside
@@ -1073,9 +1537,10 @@ impl Agent {
         at: Point<Points>,
         selector: &str,
     ) -> Result<Point<Points>, String> {
-        self.actionable_point_with_press_owner(id, native_owner, at, selector, None, true)
+        self.actionable_point_with_press_owner(id, native_owner, at, selector, None, true, false)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn actionable_point_with_press_owner(
         &self,
         id: NodeId,
@@ -1084,6 +1549,7 @@ impl Agent {
         selector: &str,
         press_owner: Option<NodeId>,
         explicit: bool,
+        for_long_press: bool,
     ) -> Result<Point<Points>, String> {
         if !self.require_hit_test {
             return Ok(fallback);
@@ -1161,25 +1627,135 @@ impl Agent {
             .iter()
             .flat_map(|node| node.hidden_press_owners.iter().copied())
             .collect();
+        // A hold's hidden owners are its own set — a view listening only
+        // for long presses reserves the hold, not the tap — but a hold's
+        // release still delivers a press, so a press-only hidden view
+        // intercepts the hold too. Hold receivers win ties: a view with
+        // both listeners resolves to its hold receiver.
+        let mut hidden_hold_owners = hidden_press_owners.clone();
+        hidden_hold_owners.extend(
+            nodes
+                .iter()
+                .flat_map(|node| node.hidden_hold_owners.iter().copied()),
+        );
         let deadline = Instant::now() + Duration::from_millis(100);
         loop {
             match self.native.hit_at(at) {
                 Ok(Some(hit))
                     if press_owner.is_some()
-                        && let Some(&receiver) = hidden_press_owners.get(&hit) =>
+                        && let Some(receiver) = self.hidden_owner_at(
+                            &nodes,
+                            if for_long_press {
+                                &hidden_hold_owners
+                            } else {
+                                &hidden_press_owners
+                            },
+                            hit,
+                            at,
+                        ) =>
                 {
                     return Err(format!(
-                        "`{selector}`: a press at ({}, {}) goes to node {receiver}, an \
-                         accessibility-hidden view that takes presses itself",
-                        at.x.0, at.y.0
+                        "`{selector}`: a {} at ({}, {}) goes to node {receiver}, an \
+                         accessibility-hidden view that takes it itself",
+                        if for_long_press { "hold" } else { "press" },
+                        at.x.0,
+                        at.y.0
                     ));
                 }
                 Ok(Some(hit))
-                    if is_descendant_or_same(hit, native_owner, &parents)
-                        || press_owner.is_some_and(|owner| {
-                            is_descendant_or_same(native_owner, hit, &parents)
-                                && is_descendant_or_same(hit, owner, &parents)
-                        }) =>
+                    if match press_owner {
+                        // A targeted press proves the hit's press receiver is
+                        // the requested one: the platform sends the press to
+                        // the innermost view that hears presses, which an
+                        // independently pressable nested control can be even
+                        // when it sits inside the target. A synthetic target
+                        // (a link span, a canvas) is the receiver under its
+                        // owner view's hit, and decorative views (no press
+                        // receiver of their own) under the target still count.
+                        Some(expected) => {
+                            // A hold's hit check resolves receivers by the
+                            // long-press rules — an input or a long-press-only
+                            // child inside a tappable parent takes the hold
+                            // itself — not by the press rules.
+                            if for_long_press {
+                                // A hold can reach several receivers: a
+                                // touch-observing child takes a touch-driven
+                                // hold while an ancestor's recognizer still
+                                // fires. Any of them may be the expected one.
+                                let receivers = self.hold_receivers(
+                                    &nodes,
+                                    &by_id,
+                                    &parents,
+                                    &hidden_hold_owners,
+                                    hit,
+                                    at,
+                                );
+                                if receivers.is_empty() {
+                                    is_descendant_or_same(hit, expected, &parents)
+                                } else {
+                                    // A hold targeted at an enabled input
+                                    // owns the gesture itself (native text
+                                    // selection) even when the model picked
+                                    // a pressable ancestor as the receiver.
+                                    receivers.contains(&expected)
+                                        || (target.input
+                                            && target.enabled
+                                            && receivers.contains(&target.id))
+                                }
+                            } else {
+                                match self.press_receiver(
+                                    &nodes,
+                                    &by_id,
+                                    &parents,
+                                    &hidden_press_owners,
+                                    hit,
+                                    at,
+                                ) {
+                                    Some(receiver) => {
+                                        // The same receiver is not enough: a
+                                        // covering sibling shares the button
+                                        // but the press still missed the
+                                        // target. The hit (or the semantic
+                                        // node it reports through) must be
+                                        // the target or sit inside it — or
+                                        // carry the target inside it, as a
+                                        // synthetic span's owner view does.
+                                        receiver == expected && {
+                                            let mut hit_node = Some(hit);
+                                            let semantic_hit = loop {
+                                                match hit_node {
+                                                    None => break None,
+                                                    Some(id) if by_id.contains_key(&id) => {
+                                                        break Some(id);
+                                                    }
+                                                    Some(id) => {
+                                                        hit_node = nodes
+                                                            .iter()
+                                                            .find(|node| {
+                                                                node.hidden_descendants
+                                                                    .contains(&id)
+                                                            })
+                                                            .map(|node| node.id)
+                                                            .or_else(|| {
+                                                                parents.get(&id).copied().flatten()
+                                                            });
+                                                    }
+                                                }
+                                            };
+                                            semantic_hit.is_some_and(|hit_node| {
+                                                is_descendant_or_same(hit_node, target.id, &parents)
+                                                    || is_descendant_or_same(
+                                                        target.id, hit_node, &parents,
+                                                    )
+                                            })
+                                        }
+                                    }
+                                    None => is_descendant_or_same(hit, expected, &parents),
+                                }
+                            }
+                        }
+                        None => is_descendant_or_same(hit, native_owner, &parents),
+                    } =>
                 {
                     return Ok(at);
                 }
@@ -1458,6 +2034,7 @@ impl Agent {
             selector,
             Some(id),
             false,
+            true,
         )?;
         self.hold_long_press(id, at, hold)
     }
@@ -1471,7 +2048,27 @@ impl Agent {
         let hold = match hold {
             Some(hold) => hold,
             None => {
-                let delay = self.scene.long_press_delay(id)?.map_or(LONG_PRESS, |ms| {
+                let delay = self.scene.long_press_delay(id)?;
+                // A synthetic target (a link span) has no delay of its
+                // own: the view owning it does.
+                let delay = match delay {
+                    delay @ Some(_) => delay,
+                    None => {
+                        let owner = self
+                            .scene
+                            .semantic_tree()?
+                            .into_iter()
+                            .find(|node| node.id == id)
+                            .and_then(|node| match node.native_target {
+                                SemanticTarget::Text { owner, .. }
+                                | SemanticTarget::Canvas { owner, .. } => Some(owner),
+                                _ => None,
+                            })
+                            .unwrap_or(id);
+                        self.scene.long_press_delay(owner)?
+                    }
+                }
+                .map_or(LONG_PRESS, |ms| {
                     Duration::from_secs_f64(f64::from(ms.max(0.0)) / 1000.0)
                 });
                 // Hold a little past the delay, as a finger does.

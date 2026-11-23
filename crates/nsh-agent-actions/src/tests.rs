@@ -20,114 +20,118 @@ fn pick_value(pick: Pick) -> serde_json::Value {
 }
 
 /// A scene asked through a host ([`RemoteScene`]) whose semantic tree
-/// is `nodes`.
-struct WithNodes(Vec<SemanticNode>, RemoteScene);
+/// is `nodes` and whose keybindings are `bindings`.
+struct WithNodes(Vec<SemanticNode>, Vec<SemanticKeybinding>, RemoteScene);
 
 impl SemanticScene for WithNodes {
     fn semantic_tree(&self) -> Result<Vec<SemanticNode>, String> {
         Ok(self.0.clone())
     }
+
+    fn keybindings(&self) -> Result<Vec<SemanticKeybinding>, String> {
+        Ok(self.1.clone())
+    }
 }
 
 impl Scene for WithNodes {
     fn activity(&self) -> Result<Activity, String> {
-        self.1.activity()
+        self.2.activity()
     }
     fn wait_for_batch(&self, seen: u64, timeout: Duration) {
-        self.1.wait_for_batch(seen, timeout)
+        self.2.wait_for_batch(seen, timeout)
     }
     fn take_errors(&self) -> Result<Vec<String>, String> {
-        self.1.take_errors()
+        self.2.take_errors()
     }
     fn input_value_text(&self, selector: &str) -> Result<Option<String>, String> {
-        self.1.input_value_text(selector)
+        self.2.input_value_text(selector)
     }
     fn pick(&self, selector: &str, target: PickTarget) -> Result<Pick, String> {
-        self.1.pick(selector, target)
+        self.2.pick(selector, target)
     }
     fn scroll_ancestors(&self, id: NodeId) -> Result<Vec<(NodeId, bool)>, String> {
-        self.1.scroll_ancestors(id)
+        self.2.scroll_ancestors(id)
     }
     fn drag_takers(&self, id: NodeId) -> Result<Vec<NodeId>, String> {
-        self.1.drag_takers(id)
+        self.2.drag_takers(id)
     }
     fn long_press_delay(&self, id: NodeId) -> Result<Option<f32>, String> {
-        self.1.long_press_delay(id)
+        self.2.long_press_delay(id)
     }
     fn horizontal(&self, id: NodeId) -> Result<bool, String> {
-        self.1.horizontal(id)
+        self.2.horizontal(id)
     }
     fn texts(&self) -> Result<Vec<String>, String> {
-        self.1.texts()
+        self.2.texts()
     }
     fn count(&self, selector: &str) -> Result<usize, String> {
-        self.1.count(selector)
+        self.2.count(selector)
     }
     fn matches(&self, selector: &str) -> Result<bool, String> {
-        self.1.matches(selector)
+        self.2.matches(selector)
     }
     fn enabled(&self, selector: &str) -> Result<bool, String> {
-        self.1.enabled(selector)
+        self.2.enabled(selector)
     }
     fn span_style(&self, selector: &str) -> Result<SpanStyle, String> {
-        self.1.span_style(selector)
+        self.2.span_style(selector)
     }
     fn view_style(&self, selector: &str) -> Result<Option<ViewStyle>, String> {
-        self.1.view_style(selector)
+        self.2.view_style(selector)
     }
     fn input_id(&self, selector: &str) -> Result<Option<NodeId>, String> {
-        self.1.input_id(selector)
+        self.2.input_id(selector)
     }
     fn dialogs(&self) -> Result<Vec<nsh_core::Dialog>, String> {
-        self.1.dialogs()
+        self.2.dialogs()
     }
     fn pending_dialog(&self) -> Result<Option<nsh_core::Dialog>, String> {
-        self.1.pending_dialog()
+        self.2.pending_dialog()
     }
     fn answered(&self) -> Result<(), String> {
-        self.1.answered()
+        self.2.answered()
     }
     fn menu(&self) -> Result<Option<Vec<nsh_core::desktop::MenuItem>>, String> {
-        self.1.menu()
+        self.2.menu()
     }
     fn menu_closed(&self) -> Result<(), String> {
-        self.1.menu_closed()
+        self.2.menu_closed()
     }
     fn clipboard(&self) -> Result<Option<String>, String> {
-        self.1.clipboard()
+        self.2.clipboard()
     }
     fn storage(&self) -> Result<std::collections::BTreeMap<String, String>, String> {
-        self.1.storage()
+        self.2.storage()
     }
     fn set_viewport(&self, size: Size<Points>) -> Result<(), String> {
-        self.1.set_viewport(size)
+        self.2.set_viewport(size)
     }
     fn span(&self, id: NodeId) -> Result<Option<(NodeId, u32, u32)>, String> {
-        self.1.span(id)
+        self.2.span(id)
     }
     fn canvas_node(&self, selector: &str) -> Result<Option<(NodeId, Point<Points>)>, String> {
-        self.1.canvas_node(selector)
+        self.2.canvas_node(selector)
     }
     fn match_inside(&self, selector: &str, id: NodeId) -> Result<Option<NodeId>, String> {
-        self.1.match_inside(selector, id)
+        self.2.match_inside(selector, id)
     }
     fn move_clock(&self, change: ClockChange) -> Result<(), String> {
-        self.1.move_clock(change)
+        self.2.move_clock(change)
     }
     fn manual_clock(&self) -> bool {
-        self.1.manual_clock()
+        self.2.manual_clock()
     }
     fn send_host_event(&self, name: &str, data: serde_json::Value) -> Result<(), String> {
-        self.1.send_host_event(name, data)
+        self.2.send_host_event(name, data)
     }
     fn opened_urls(&self) -> Result<Vec<String>, String> {
-        self.1.opened_urls()
+        self.2.opened_urls()
     }
     fn window_root(&self, id: &str) -> Result<Option<NodeId>, String> {
-        self.1.window_root(id)
+        self.2.window_root(id)
     }
     fn window_of(&self, id: NodeId) -> Result<NodeId, String> {
-        self.1.window_of(id)
+        self.2.window_of(id)
     }
 }
 
@@ -249,9 +253,14 @@ impl StrictNative for GateNative {
         self.hits.lock().unwrap().push(at);
         if let Some(windows) = &self.windows {
             let selected = *windows.selected.lock().unwrap();
-            return Ok(self.bounds.iter().find_map(|(id, bounds)| {
-                (windows.nodes.get(id) == Some(&selected) && bounds.contains(&at)).then_some(*id)
-            }));
+            return Ok(self
+                .bounds
+                .iter()
+                .filter(|(id, bounds)| {
+                    windows.nodes.get(id) == Some(&selected) && bounds.contains(&at)
+                })
+                .map(|(id, _)| *id)
+                .max());
         }
         self.hit.clone()
     }
@@ -962,6 +971,331 @@ fn long_press_refuses_hidden_receivers_but_accepts_decorative_children() {
 }
 
 #[test]
+fn a_hold_through_a_touch_observer_still_reaches_the_parents_recognizer() {
+    use nsh_core::{EventMask, MountItem, ViewKind};
+
+    // A raw `Touch` listener installs no recognizer: a hold on the child
+    // still fires the parent's long-press recognizer.
+    let model = long_press_only_scene(false);
+    let mut touch = EventMask::default();
+    touch.set(EventKind::Touch, true);
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 3,
+                frame: Bounds::new(point(px(30.0), px(40.0)), size(px(20.0), px(20.0))),
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Events {
+                id: 3,
+                events: touch,
+            },
+        ],
+    });
+    let bounds = [(
+        2,
+        Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+    )];
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(model, Ok(Some(3)), &bounds, &[], long_presses.clone());
+    let center = point(px(50.0), px(50.0));
+
+    agent.long_press_node(2, None).unwrap();
+
+    assert_eq!(
+        *long_presses.lock().unwrap(),
+        vec![(center, Duration::from_millis(425))]
+    );
+}
+
+#[test]
+fn a_hold_refuses_a_touch_observer_that_also_takes_presses() {
+    use nsh_core::{EventMask, MountItem, ViewKind};
+
+    // Touch + PressDown takes the press in native routing (`has_press`
+    // covers the down/up listeners), so the parent's recognizer never
+    // fires: the hold must fail rather than report success.
+    let model = long_press_only_scene(false);
+    let mut events = EventMask::default();
+    events.set(EventKind::Touch, true);
+    events.set(EventKind::PressDown, true);
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 3,
+                frame: Bounds::new(point(px(30.0), px(40.0)), size(px(20.0), px(20.0))),
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Events { id: 3, events },
+        ],
+    });
+    let bounds = [(
+        2,
+        Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+    )];
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(model, Ok(Some(3)), &bounds, &[], long_presses.clone());
+
+    let error = agent.long_press_node(2, None).unwrap_err();
+
+    assert!(error.contains("occluded"), "{error}");
+    assert!(long_presses.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_hold_refuses_a_press_down_child_even_without_touch() {
+    use nsh_core::{EventMask, MountItem, ViewKind};
+
+    // PressDown alone also takes the press natively: the model's pick
+    // steps over it to the long-pressable parent, but the recognizer
+    // there can never fire.
+    let model = long_press_only_scene(false);
+    let mut events = EventMask::default();
+    events.set(EventKind::PressDown, true);
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 3,
+                frame: Bounds::new(point(px(30.0), px(40.0)), size(px(20.0), px(20.0))),
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Events { id: 3, events },
+        ],
+    });
+    let bounds = [(
+        2,
+        Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+    )];
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(model, Ok(Some(3)), &bounds, &[], long_presses.clone());
+
+    let error = agent.long_press_node(2, None).unwrap_err();
+
+    assert!(error.contains("occluded"), "{error}");
+    assert!(long_presses.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_hold_over_a_press_down_child_fails_when_the_parent_also_takes_presses() {
+    use nsh_core::{EventMask, MountItem, ViewKind};
+
+    // A card whose long-press callback is native keeps nothing when a
+    // press-down child owns the gesture: touches still reach its touch
+    // listener, but the native callback can never run.
+    let model = long_press_only_scene(false);
+    let mut events = EventMask::default();
+    events.set(EventKind::LongPress, true);
+    events.set(EventKind::Touch, true);
+    let mut press_down = EventMask::default();
+    press_down.set(EventKind::PressDown, true);
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Events { id: 2, events },
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 3,
+                frame: Bounds::new(point(px(30.0), px(40.0)), size(px(20.0), px(20.0))),
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Events {
+                id: 3,
+                events: press_down,
+            },
+        ],
+    });
+    let bounds = [(
+        2,
+        Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+    )];
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(model, Ok(Some(3)), &bounds, &[], long_presses.clone());
+
+    let error = agent.long_press_node(2, None).unwrap_err();
+
+    assert!(error.contains("occluded"), "{error}");
+    assert!(long_presses.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_hold_through_a_press_down_child_reaches_a_touch_observer() {
+    use nsh_core::{EventMask, MountItem, ViewKind, ViewProps};
+
+    // A card holding from raw touches keeps its hold when the press lands
+    // on an enabled child that owns the native press (press-down only):
+    // touches follow the raw touch path beside the recognizers.
+    let model = gate_scene(ViewKind::View, false, false);
+    let mut touch = EventMask::default();
+    touch.set(EventKind::Touch, true);
+    let mut press_down = EventMask::default();
+    press_down.set(EventKind::PressDown, true);
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Events {
+                id: 2,
+                events: touch,
+            },
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 3,
+                frame: Bounds::new(point(px(30.0), px(40.0)), size(px(20.0), px(20.0))),
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Events {
+                id: 3,
+                events: press_down,
+            },
+            MountItem::ViewProps {
+                id: 3,
+                props: Box::new(ViewProps {
+                    test_id: Some("child".into()),
+                    ..ViewProps::default()
+                }),
+            },
+        ],
+    });
+    let bounds = [(
+        2,
+        Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+    )];
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(model, Ok(Some(3)), &bounds, &[], long_presses.clone());
+
+    agent.long_press_node(2, None).unwrap();
+
+    assert_eq!(
+        *long_presses.lock().unwrap(),
+        vec![(point(px(50.0), px(50.0)), Duration::from_millis(600))]
+    );
+}
+
+#[test]
+fn a_touch_observer_takes_a_hold_targeted_at_it() {
+    use nsh_core::{EventMask, MountItem, ViewKind};
+
+    // An app can hold from raw touches, so a hold aimed at the observer
+    // itself still goes through even under an ancestor's recognizer.
+    let model = long_press_only_scene(false);
+    let mut touch = EventMask::default();
+    touch.set(EventKind::Touch, true);
+    let child_bounds = Bounds::new(point(px(30.0), px(40.0)), size(px(20.0), px(20.0)));
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 3,
+                frame: child_bounds,
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Events {
+                id: 3,
+                events: touch,
+            },
+        ],
+    });
+    let bounds = [
+        (
+            2,
+            Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+        ),
+        (3, child_bounds),
+    ];
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(model, Ok(Some(3)), &bounds, &[], long_presses.clone());
+
+    agent.long_press_node(3, None).unwrap();
+
+    assert_eq!(
+        *long_presses.lock().unwrap(),
+        vec![(child_bounds.center(), Duration::from_millis(600))]
+    );
+}
+
+#[test]
+fn a_targeted_hold_refuses_a_nested_input_hit() {
+    use nsh_core::{InputConfig, MountItem, ViewKind};
+
+    // A hold on a field inside a long-pressable card goes to the field's
+    // text selection, not the card's recognizer.
+    let model = long_press_only_scene(false);
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::Input,
+            },
+            MountItem::Frame {
+                id: 3,
+                frame: Bounds::new(point(px(30.0), px(40.0)), size(px(20.0), px(20.0))),
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Input {
+                id: 3,
+                config: Box::new(InputConfig::default()),
+            },
+        ],
+    });
+    let bounds = [(
+        2,
+        Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+    )];
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(model, Ok(Some(3)), &bounds, &[], long_presses.clone());
+
+    let error = agent.long_press_node(2, None).unwrap_err();
+    assert!(error.contains("occluded_by"), "{error}");
+    assert!(long_presses.lock().unwrap().is_empty());
+}
+
+#[test]
 fn inputs_without_listeners_accept_node_and_point_long_presses() {
     use nsh_core::{EventMask, MountItem, ViewKind};
 
@@ -1062,6 +1396,7 @@ fn long_press_at_targets_an_inline_span_under_its_text_owner_hit() {
 fn target_scene(nodes: Vec<SemanticNode>) -> Arc<WithNodes> {
     Arc::new(WithNodes(
         nodes,
+        Vec::new(),
         RemoteScene::new(move |step| match step {
             TestStep::Scene {
                 query: nsh_dev::protocol::SceneQuery::Activity,
@@ -1085,6 +1420,7 @@ fn manual_target_scene(
 
     Arc::new(WithNodes(
         nodes,
+        Vec::new(),
         RemoteScene::new(move |step| match step {
             TestStep::Scene {
                 query: SceneQuery::Activity,
@@ -1223,6 +1559,45 @@ fn button_label_press_rejects_siblings_and_accepts_only_its_ancestry() {
             assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 1);
             assert_eq!(*pressed_at.lock().unwrap(), vec![label_bounds.center()]);
         }
+    }
+}
+
+#[test]
+fn button_label_press_rejects_a_sibling_sharing_its_receiver() {
+    // Node 4 is not pressable itself: a hit on it (or its child 5)
+    // routes to node 2 — the same receiver the target's press takes.
+    // It still covers the label, so the press must not pass.
+    let label_bounds = Bounds::new(point(px(20.0), px(10.0)), size(px(40.0), px(20.0)));
+    for hit in [4, 5] {
+        let nodes = vec![
+            semantic_node(1, None, false, SemanticTarget::View),
+            semantic_node(2, Some(1), true, SemanticTarget::View),
+            semantic_node(6, Some(2), false, SemanticTarget::View),
+            semantic_node(3, Some(6), false, SemanticTarget::View),
+            semantic_node(4, Some(2), false, SemanticTarget::View),
+            semantic_node(5, Some(4), false, SemanticTarget::View),
+        ];
+        let agent = Agent::requiring_native_hit_test(
+            target_scene(nodes),
+            Box::new(GateNative {
+                windows: None,
+                bounds: [
+                    (2, Bounds::new(Point::default(), size(px(80.0), px(40.0)))),
+                    (3, label_bounds),
+                ]
+                .into(),
+                text_bounds: Default::default(),
+                hit: Ok(Some(hit)),
+                hits: Arc::new(Mutex::new(Vec::new())),
+                presses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                pressed_at: Arc::new(Mutex::new(Vec::new())),
+                long_presses: Arc::new(Mutex::new(Vec::new())),
+                typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                viewport: size(px(100.0), px(100.0)),
+            }),
+        );
+        let result = agent.press_node(3);
+        assert!(result.unwrap_err().contains(&format!("occluded_by: {hit}")));
     }
 }
 
@@ -1905,4 +2280,570 @@ fn strict_explicit_point_outside_the_visible_target_is_an_error() {
         "{error}"
     );
     agent.drag_node_by(2, None, delta).unwrap();
+}
+
+#[test]
+fn press_refuses_an_independently_pressable_nested_control() {
+    // A targeted press on node 2 must not land on the independently
+    // pressable child 4 under the same point: the platform would run
+    // 4's action, not 2's.
+    let nodes = vec![
+        semantic_node(1, None, false, SemanticTarget::View),
+        semantic_node(2, Some(1), true, SemanticTarget::View),
+        semantic_node(4, Some(2), true, SemanticTarget::View),
+    ];
+    let presses = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let agent = Agent::requiring_native_hit_test(
+        target_scene(nodes),
+        Box::new(GateNative {
+            windows: None,
+            bounds: [
+                (
+                    2,
+                    Bounds::new(point(px(20.0), px(10.0)), size(px(60.0), px(80.0))),
+                ),
+                (
+                    4,
+                    Bounds::new(point(px(30.0), px(40.0)), size(px(20.0), px(20.0))),
+                ),
+            ]
+            .into(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(4)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: presses.clone(),
+            pressed_at: Arc::new(Mutex::new(Vec::new())),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: size(px(100.0), px(100.0)),
+        }),
+    );
+
+    let error = agent.press_node(2).unwrap_err();
+    assert!(error.contains("occluded_by: 4"), "{error}");
+    assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+    agent.press_node(4).unwrap();
+    assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+fn keybinding(id: &str, chord: &str) -> SemanticKeybinding {
+    SemanticKeybinding {
+        id: id.into(),
+        chord: chord.into(),
+        label: None,
+        menu_path: None,
+        menu_action_id: None,
+    }
+}
+
+fn keybinding_scene(bindings: Vec<SemanticKeybinding>) -> Arc<WithNodes> {
+    Arc::new(WithNodes(
+        Vec::new(),
+        bindings,
+        RemoteScene::new(move |step| match step {
+            TestStep::Scene {
+                query: nsh_dev::protocol::SceneQuery::Activity,
+            } => Ok(serde_json::json!({"batches": 1, "since_last_ms": 1000.0})),
+            TestStep::Scene {
+                query: nsh_dev::protocol::SceneQuery::TakeErrors,
+            } => Ok(serde_json::json!([])),
+            _ => Err("unexpected scene query".into()),
+        }),
+    ))
+}
+
+#[derive(Default)]
+struct KeybindingRecords {
+    sent: Mutex<Vec<String>>,
+    fired: Mutex<Vec<String>>,
+}
+
+/// A strict native that dispatches keybindings by identity only when
+/// `identity` is set, like a platform with a real binding registry.
+struct KeybindingNative {
+    identity: bool,
+    records: Arc<KeybindingRecords>,
+}
+
+impl Native for KeybindingNative {
+    fn bounds(&self, _: NodeId) -> Option<Bounds<Points>> {
+        None
+    }
+    fn viewport(&self) -> Size<Points> {
+        size(px(100.0), px(100.0))
+    }
+    fn press(&self, _: Point<Points>) {}
+    fn long_press(&self, _: Point<Points>, _: Duration) {}
+    fn scroll(&self, _: Point<Points>, _: Point<Points>) {}
+    fn drag(&self, _: Point<Points>, _: Point<Points>) {}
+    fn press_keys(&self, keys: &str) -> Result<(), String> {
+        self.records.sent.lock().unwrap().push(keys.to_string());
+        Ok(())
+    }
+    fn type_text(&self, _: &str) {}
+    fn key(&self, _: Key) {}
+    fn input_text(&self, _: NodeId) -> Option<String> {
+        None
+    }
+    fn back(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn answer_dialog(&self, _: Option<&str>) -> Result<(), String> {
+        Ok(())
+    }
+    fn animating(&self) -> bool {
+        false
+    }
+    fn screenshot(&self) -> Result<Vec<u8>, String> {
+        Err("unsupported".into())
+    }
+    fn resize(&self, _: Points, _: Points) -> Result<(), String> {
+        Ok(())
+    }
+    fn set_dark(&self, _: bool) -> Result<(), String> {
+        Ok(())
+    }
+    fn quit(&self) {}
+}
+
+impl StrictNative for KeybindingNative {
+    fn fire_keybinding(&self, binding: &SemanticKeybinding) -> Result<(), String> {
+        if self.identity {
+            self.records.fired.lock().unwrap().push(binding.id.clone());
+            Ok(())
+        } else {
+            Err(NATIVE_KEYBINDING_UNSUPPORTED.into())
+        }
+    }
+}
+
+#[test]
+fn fire_keybinding_sends_a_unique_chord_as_keys() {
+    let records = Arc::new(KeybindingRecords::default());
+    let agent = Agent::new(
+        keybinding_scene(vec![keybinding("keymap.quit", "ctrl+q")]),
+        Box::new(KeybindingNative {
+            identity: false,
+            records: records.clone(),
+        }),
+    );
+
+    agent.fire_keybinding("keymap.quit").unwrap();
+
+    assert_eq!(*records.sent.lock().unwrap(), vec!["ctrl+q".to_string()]);
+    assert!(records.fired.lock().unwrap().is_empty());
+}
+
+#[test]
+fn fire_keybinding_dispatches_a_shared_chord_by_identity() {
+    // Two bindings on `ctrl+s`: sending the chord alone could run the
+    // other command, so the platform must dispatch by identity.
+    let records = Arc::new(KeybindingRecords::default());
+    let agent = Agent::new(
+        keybinding_scene(vec![
+            keybinding("keymap.save", "ctrl+s"),
+            keybinding("keymap.save_all", "ctrl+s"),
+        ]),
+        Box::new(KeybindingNative {
+            identity: true,
+            records: records.clone(),
+        }),
+    );
+
+    agent.fire_keybinding("keymap.save_all").unwrap();
+
+    assert_eq!(
+        *records.fired.lock().unwrap(),
+        vec!["keymap.save_all".to_string()]
+    );
+    assert!(records.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn fire_keybinding_fails_closed_on_a_shared_chord_without_identity_dispatch() {
+    let records = Arc::new(KeybindingRecords::default());
+    let agent = Agent::new(
+        keybinding_scene(vec![
+            keybinding("keymap.save", "ctrl+s"),
+            keybinding("keymap.save_all", "ctrl+s"),
+        ]),
+        Box::new(KeybindingNative {
+            identity: false,
+            records: records.clone(),
+        }),
+    );
+
+    assert_eq!(
+        agent.fire_keybinding("keymap.save_all").unwrap_err(),
+        NATIVE_KEYBINDING_UNSUPPORTED
+    );
+    assert!(records.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn scroll_node_only_scrolls_a_view_the_screen_marks_scrollable() {
+    use nsh_dev::protocol::SceneQuery;
+
+    let pick = Arc::new(Mutex::new(Pick::Disabled));
+    let scene_pick = pick.clone();
+    let scene = Arc::new(WithNodes(
+        vec![
+            semantic_node(1, None, false, SemanticTarget::View),
+            semantic_node(2, Some(1), false, SemanticTarget::View),
+        ],
+        Vec::new(),
+        RemoteScene::new(move |step| match step {
+            TestStep::Scene {
+                query: SceneQuery::Activity,
+            } => Ok(serde_json::json!({"batches": 1, "since_last_ms": 1000.0})),
+            TestStep::Scene {
+                query: SceneQuery::TakeErrors,
+            } => Ok(serde_json::json!([])),
+            TestStep::Scene {
+                query: SceneQuery::Pick { selector, target },
+            } => Ok(pick_value(
+                if selector == "view:2" && matches!(target, PickTarget::ScrollView) {
+                    scene_pick.lock().unwrap().clone()
+                } else {
+                    Pick::None
+                },
+            )),
+            TestStep::Scene {
+                query: SceneQuery::ScrollAncestors { .. },
+            } => Ok(serde_json::json!([])),
+            _ => Err("unexpected scene query".into()),
+        }),
+    ));
+    let agent = Agent::requiring_native_hit_test(
+        scene,
+        Box::new(GateNative {
+            windows: None,
+            bounds: [(
+                2,
+                Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+            )]
+            .into(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(2)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pressed_at: Arc::new(Mutex::new(Vec::new())),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: size(px(100.0), px(100.0)),
+        }),
+    );
+    let delta = point(px(0.0), px(5.0));
+
+    // A locked scroller would silently scroll an eligible ancestor.
+    assert_eq!(
+        agent.scroll_node(2, delta).unwrap_err(),
+        "`view:2` is a scroll view that does not scroll"
+    );
+    *pick.lock().unwrap() = Pick::One(3);
+    let error = agent.scroll_node(2, delta).unwrap_err();
+    assert!(error.contains("`view:2` does not scroll"), "{error}");
+    *pick.lock().unwrap() = Pick::One(2);
+    agent.scroll_node(2, delta).unwrap();
+}
+
+#[test]
+fn drag_node_by_takes_an_explicit_origin_when_the_center_is_covered() {
+    use nsh_core::{EventMask, MountItem, ViewKind};
+
+    // Node 9 covers node 2's center: the default point is occluded,
+    // but a drag from an explicit edge point still works.
+    let model = Arc::new(Model::default());
+    let mut events = EventMask::default();
+    events.set(EventKind::Press, true);
+    let target = Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0)));
+    let cover = Bounds::new(point(px(40.0), px(40.0)), size(px(20.0), px(20.0)));
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Create {
+                id: 2,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 2,
+                frame: target,
+            },
+            MountItem::Insert {
+                parent: 1,
+                child: 2,
+                before: None,
+            },
+            MountItem::Events { id: 2, events },
+            MountItem::Create {
+                id: 9,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 9,
+                frame: cover,
+            },
+            MountItem::Insert {
+                parent: 1,
+                child: 9,
+                before: None,
+            },
+        ],
+    });
+    let windows = Arc::new(WindowRecords {
+        nodes: [(1, 1), (2, 1), (9, 1)].into(),
+        ..WindowRecords::default()
+    });
+    *windows.selected.lock().unwrap() = 1;
+    let agent = Agent::requiring_native_hit_test(
+        model,
+        Box::new(GateNative {
+            windows: Some(windows.clone()),
+            bounds: [(2, target), (9, cover)].into(),
+            text_bounds: Default::default(),
+            hit: Ok(None),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pressed_at: Arc::new(Mutex::new(Vec::new())),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: size(px(100.0), px(100.0)),
+        }),
+    );
+
+    assert!(agent.node_point(2).is_err());
+    let from = point(px(25.0), px(30.0));
+    agent
+        .drag_node_by(2, Some(from), point(px(10.0), px(0.0)))
+        .unwrap();
+    assert_eq!(
+        windows.actions.lock().unwrap().as_slice(),
+        &[("drag", 1, Some(from))]
+    );
+}
+
+#[test]
+fn press_at_on_a_decorative_hidden_icon_presses_its_ancestor_button() {
+    // A decorative accessibility-hidden icon (3) carries no action of
+    // its own: the press goes to the button (2) it decorates.
+    let mut owner = semantic_node(2, Some(1), true, SemanticTarget::View);
+    owner.hidden_descendants = vec![3];
+    let nodes = vec![semantic_node(1, None, false, SemanticTarget::View), owner];
+    let presses = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let pressed_at = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::requiring_native_hit_test(
+        target_scene(nodes),
+        Box::new(GateNative {
+            windows: None,
+            bounds: [(
+                3,
+                Bounds::new(point(px(20.0), px(20.0)), size(px(10.0), px(10.0))),
+            )]
+            .into(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(3)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: presses.clone(),
+            pressed_at: pressed_at.clone(),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: size(px(100.0), px(100.0)),
+        }),
+    );
+    let at = point(px(25.0), px(25.0));
+
+    agent.press_at(at).unwrap();
+
+    assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(*pressed_at.lock().unwrap(), vec![at]);
+}
+
+#[test]
+fn press_at_refuses_a_hidden_view_that_takes_its_own_presses() {
+    // The hidden view 3 has its own press handler: a semantic press
+    // there must not be rerouted to its visible ancestor.
+    let mut owner = semantic_node(2, Some(1), true, SemanticTarget::View);
+    owner.hidden_descendants = vec![3];
+    owner.hidden_press_owners = vec![(3, 3)];
+    let nodes = vec![semantic_node(1, None, false, SemanticTarget::View), owner];
+    let presses = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let agent = Agent::requiring_native_hit_test(
+        target_scene(nodes),
+        Box::new(GateNative {
+            windows: None,
+            bounds: Default::default(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(3)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: presses.clone(),
+            pressed_at: Arc::new(Mutex::new(Vec::new())),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: size(px(100.0), px(100.0)),
+        }),
+    );
+    let at = point(px(25.0), px(25.0));
+
+    let error = agent.press_at(at).unwrap_err();
+
+    assert!(error.contains("accessibility-hidden"), "{error}");
+    assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn a_hold_reaches_a_long_press_only_child_inside_a_pressable_parent() {
+    use nsh_core::{EventMask, MountItem, ViewKind};
+
+    // The parent takes presses, the child only holds: the hold's hit check
+    // must resolve receivers by the long-press rules, not refuse the child
+    // as a press receiver mismatch.
+    let model = gate_scene(ViewKind::View, false, false);
+    let mut events = EventMask::default();
+    events.set(EventKind::LongPress, true);
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::View,
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Events { id: 3, events },
+            MountItem::Frame {
+                id: 3,
+                frame: Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+            },
+        ],
+    });
+    let frame = Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0)));
+    let bounds = [(2, frame), (3, frame)];
+    let center = point(px(50.0), px(50.0));
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(model, Ok(Some(3)), &bounds, &[], long_presses.clone());
+    let hold = Duration::from_millis(800);
+
+    agent.long_press_node(3, Some(hold)).unwrap();
+    agent.long_press_at(center, Some(hold)).unwrap();
+
+    assert_eq!(
+        *long_presses.lock().unwrap(),
+        vec![(center, hold), (center, hold)]
+    );
+}
+
+#[test]
+fn a_swipe_default_distance_stays_inside_when_clipping_moves_the_origin() {
+    use nsh_core::ViewKind;
+
+    // Clipping moves the drag origin to the visible sliver's middle: the
+    // default distance must fit from that origin, not the node's own
+    // center (which sits lower and would send the endpoint offscreen).
+    let model = gate_scene(ViewKind::View, false, true);
+    let bounds = [
+        (
+            1,
+            Bounds::new(point(px(0.0), px(45.0)), size(px(100.0), px(55.0))),
+        ),
+        (
+            2,
+            Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+        ),
+    ];
+    let agent = gate_agent(
+        model,
+        Ok(Some(2)),
+        &bounds,
+        size(px(100.0), px(100.0)),
+        Arc::default(),
+        Arc::default(),
+        Arc::default(),
+    );
+
+    agent.swipe_node(2, SwipeDirection::Down, None).unwrap();
+}
+
+#[test]
+fn fire_keybinding_dispatches_an_aliased_shared_chord_by_identity() {
+    // `control-s` and `ctrl+s` are the same chord: alias spellings must
+    // not hide the share and let the chord go out as keys.
+    let records = Arc::new(KeybindingRecords::default());
+    let agent = Agent::new(
+        keybinding_scene(vec![
+            keybinding("keymap.save", "control-s"),
+            keybinding("keymap.save_all", "ctrl+s"),
+        ]),
+        Box::new(KeybindingNative {
+            identity: true,
+            records: records.clone(),
+        }),
+    );
+
+    agent.fire_keybinding("keymap.save_all").unwrap();
+
+    assert_eq!(
+        *records.fired.lock().unwrap(),
+        vec!["keymap.save_all".to_string()]
+    );
+    assert!(records.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn fire_keybinding_dispatches_a_short_spelled_shared_chord_by_identity() {
+    // The menu catalogue spells these keys short (its `Key::label()` gives
+    // `pgup`, `pgdn`, `ins`): a keymap `ctrl-pageup` and a catalogue
+    // `ctrl+pgup` are one chord, so the keymap entry must dispatch by
+    // identity or it could fire the menu's action.
+    let records = Arc::new(KeybindingRecords::default());
+    let agent = Agent::new(
+        keybinding_scene(vec![
+            keybinding("keymap.prev_tab", "ctrl-pageup"),
+            SemanticKeybinding {
+                id: "menu.File/#7".into(),
+                chord: "ctrl+pgup".into(),
+                label: Some("Previous".into()),
+                menu_path: Some(vec!["File".into(), "Previous".into()]),
+                menu_action_id: Some(7),
+            },
+        ]),
+        Box::new(KeybindingNative {
+            identity: true,
+            records: records.clone(),
+        }),
+    );
+
+    agent.fire_keybinding("keymap.prev_tab").unwrap();
+
+    assert_eq!(
+        *records.fired.lock().unwrap(),
+        vec!["keymap.prev_tab".to_string()]
+    );
+    assert!(records.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_swipe_without_room_to_the_edge_errors_instead_of_overshooting() {
+    // An origin a half point inside the left edge cannot host a default
+    // swipe: refuse rather than asking for a 1pt move past the edge.
+    let model = gate_scene(nsh_core::ViewKind::View, false, false);
+    let agent = gate_agent(
+        model,
+        Ok(Some(2)),
+        &[(
+            2,
+            Bounds::new(point(px(0.5), px(50.0)), size(px(1.0), px(1.0))),
+        )],
+        size(px(100.0), px(100.0)),
+        Arc::default(),
+        Arc::default(),
+        Arc::default(),
+    );
+
+    let error = agent
+        .swipe_at(point(px(0.5), px(50.5)), SwipeDirection::Left, None)
+        .unwrap_err();
+
+    assert!(error.contains("no room"), "{error}");
 }
