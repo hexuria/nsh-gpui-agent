@@ -85,12 +85,9 @@ in-process listener. `dev-agent` is on by default here and starts the strict ada
 buwiz's feature split. A release embedding that wants only the in-process API or server should disable default
 features so the development adapter is not linked.
 
-These differences are imposed by the current pure doors and are not behavior-preserving yet: synthesized input cannot
-be stamped or wrapped for input provenance inside upstream's synth path; the legacy server's settle wait cannot read
-the surface's pending/frame bit and treats it as quiet; and `dropFiles` delegates to upstream rather than preserving
-the pointer's window as buwiz did. Reading the public `NshView::surface` facade can also run upstream's keyboard
-surface routing (`input::enter`) as a side effect, because no pure surface-ownership or window-registry door exists;
-passive hit and ownership scans therefore are not perfectly passive.
+One build-time difference remains: because the doors are dev-gated, `nsh-platform-macos` is pinned with its `dev`
+feature even when a consumer selects only the in-process server. That compiles upstream development support into such
+a build. Input provenance, settle behavior, file drops, surface ownership and window lookup match buwiz.
 
 ## gpui-agent version
 
