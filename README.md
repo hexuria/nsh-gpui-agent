@@ -4,9 +4,17 @@ Makes an app built with [Native Shell](https://github.com/longbridge/nsh) (NSH) 
 [gpui-agent](https://github.com/hexuria/gpui-agent): a client can read the app's tree of views, press, type, scroll
 and take screenshots, over a loopback connection the app opens only when it is told to.
 
-> **Status: being set up.** The code is moving here from our NSH fork. Until this notice is removed, nothing in this
-> repository builds or runs. The plan is in
+> **Status: moving.** The adapter and the agent actions are here and their headless tests pass against the commit
+> below. No platform has been run from this repository yet: until the platforms table says otherwise, a platform does
+> not work from here. The plan is in
 > [`hexuria/nsh`, branch `feat/nsh-agent-socket`](https://github.com/hexuria/nsh/tree/feat/nsh-agent-socket/handover/agent-socket).
+
+## What is here
+
+| Crate | What it does |
+|---|---|
+| `crates/nsh-agent-actions` | The strict agent actions: a semantic tree of the mounted views, and node and point actions (press, long press, type, scroll, keys, keybindings, screenshots) that prove their target with a native hit-test before acting. Hosts plug in through two traits, `SemanticScene` (implemented here for NSH's `nsh_testing::agent::Model`) and `StrictNative` (each platform implements it). |
+| `crates/nsh-gpui-agent` | The gpui-agent adapter: serves `gpui-agent`'s protocol over loopback and maps its requests onto `nsh-agent-actions`. |
 
 ## Which NSH to use
 
@@ -17,8 +25,8 @@ and take screenshots, over a loopback connection the app opens only when it is t
 | Repository | `https://github.com/hexuria/nsh` |
 | Branch | `gpui-agent` |
 | What it is | An upstream release of `longbridge/nsh` plus a small set of doors, and nothing else |
-| Upstream release it sits on | `v0.6.1` (to be kept current here) |
-| Commit this repository is tested with | not yet set: the branch is created in the first stage of the plan |
+| Upstream release it sits on | `v0.6.1` (`2f51d8611`) |
+| Commit this repository is tested with | [`b609258a5`](https://github.com/hexuria/nsh/commit/b609258a57ff1e8eefae34a7733f69bfca5fda0c) |
 | The doors | `SOCKET.md` at the root of that branch lists every one |
 
 A *door* is a small change that makes something in NSH public: an accessor, or a hook that calls out. A door holds
@@ -29,7 +37,7 @@ The branch is rebased onto each new upstream release, so depend on a commit, not
 
 ```toml
 [dependencies]
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "<commit of branch gpui-agent>", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "b609258a57ff1e8eefae34a7733f69bfca5fda0c", default-features = false, features = ["agent"] }
 ```
 
 ## Using it from an app
@@ -42,7 +50,8 @@ builds NSH from its own checkout must point this repository's NSH at that same c
 [patch."https://github.com/hexuria/nsh"]
 nsh-core    = { path = "../nsh/crates/nsh-core" }
 nsh-testing = { path = "../nsh/crates/nsh-testing" }
-# ... one line for each nsh-* crate this repository depends on
+nsh-dev     = { path = "../nsh/crates/nsh-dev" }
+# nsh-core, nsh-dev and nsh-testing are the nsh-* crates this repository depends on
 ```
 
 The app's NSH must contain everything branch `gpui-agent` has. Our own app line, `hexuria/nsh` branch `buwiz-next`,
@@ -50,12 +59,21 @@ is that branch plus the app's other changes.
 
 ## gpui-agent version
 
-`gpui-agent` 0.3.0 during the move, so behavior can be compared like for like. Moving to 0.4.0 is the plan's last
+`gpui-agent` `=0.3.0` during the move, so behavior can be compared like for like. Moving to 0.4.0 is the plan's last
 stage.
 
 ## Platforms
 
-To be filled in from real runs: macOS, Linux, Windows, Android, iOS, web.
+Filled in from real runs on each platform's own machine. Headless tests on Linux do not count.
+
+| Platform | Status | Tested on |
+|---|---|---|
+| macOS | not run yet | |
+| Linux | not run yet | |
+| Windows | not run yet | |
+| Android | not run yet | |
+| iOS | not run yet | |
+| Web | not run yet | |
 
 ## License
 
