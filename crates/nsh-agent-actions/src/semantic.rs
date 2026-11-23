@@ -200,6 +200,9 @@ pub(crate) fn nodes(screen: &Screen) -> Vec<SemanticNode> {
                 if let Some(receiver) = hidden_hold {
                     owner.hidden_hold_owners.push((id, receiver));
                 }
+                if let Some(span) = view.span() {
+                    owner.hidden_text_spans.push((id, span.view, span.start, span.end));
+                }
             }
             stack.extend(
                 children
@@ -301,6 +304,7 @@ pub(crate) fn nodes(screen: &Screen) -> Vec<SemanticNode> {
             hidden_descendants: Vec::new(),
             hidden_press_owners: Vec::new(),
             hidden_hold_owners: Vec::new(),
+            hidden_text_spans: Vec::new(),
         });
         stack.extend(
             children

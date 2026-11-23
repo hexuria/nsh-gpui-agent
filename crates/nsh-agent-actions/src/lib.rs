@@ -148,6 +148,11 @@ pub struct SemanticNode {
     /// the innermost hidden view around it that takes holds).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_hold_owners: Vec<(NodeId, NodeId)>,
+    /// The link spans of hidden text views under this node, as
+    /// `(link, text view, start, end)`: a native hit reports the text
+    /// view while the gesture can belong to the link at the point.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_text_spans: Vec<(NodeId, NodeId, u32, u32)>,
 }
 
 /// A keyboard shortcut the host can fire through its native input path.
@@ -1030,15 +1035,41 @@ impl Agent {
                     .iter()
                     .find(|node| node.hidden_descendants.contains(&id))
                     .ok_or("target_gone: coordinate has no semantic target")?;
-                if matches!(actionability, PointActionability::Press)
-                    && let Some(&(_, receiver)) = owner
-                        .hidden_press_owners
-                        .iter()
-                        .find(|(hidden, _)| *hidden == id)
+                let (gesture, owners) = match actionability {
+                    PointActionability::Press => ("press", &owner.hidden_press_owners),
+                    PointActionability::LongPress => ("hold", &owner.hidden_hold_owners),
+                    PointActionability::Any => ("press", &owner.hidden_press_owners),
+                };
+                let receiver = owners
+                    .iter()
+                    .find(|(hidden, _)| *hidden == id)
+                    .map(|(_, receiver)| *receiver)
+                    .or_else(|| {
+                        // A hit on a hidden text view reports the text
+                        // view; the gesture can belong to its link.
+                        owner
+                            .hidden_text_spans
+                            .iter()
+                            .find(|(_, text, start, end)| {
+                                *text == id
+                                    && self
+                                        .native
+                                        .text_bounds(*text, *start, *end)
+                                        .is_some_and(|bounds| bounds.contains(&at))
+                            })
+                            .and_then(|(link, ..)| {
+                                owners
+                                    .iter()
+                                    .find(|(hidden, _)| hidden == link)
+                                    .map(|(_, receiver)| *receiver)
+                            })
+                    });
+                if !matches!(actionability, PointActionability::Any)
+                    && let Some(receiver) = receiver
                 {
                     return Err(format!(
-                        "node {id} is accessibility-hidden: a press at ({}, {}) goes to node \
-                         {receiver}, not to node {}",
+                        "node {id} is accessibility-hidden: a {gesture} at ({}, {}) goes to \
+                         node {receiver}, not to node {}",
                         at.x.0, at.y.0, owner.id
                     ));
                 }
@@ -1173,6 +1204,34 @@ impl Agent {
             })
     }
 
+    /// The hidden view a gesture on hidden hit `hit` goes to: `hit`
+    /// itself when `owners` names it, else the hidden link span of a
+    /// hidden text hit at `at` — the native hit reports the text view
+    /// while the gesture belongs to the link.
+    fn hidden_owner_at(
+        &self,
+        nodes: &[SemanticNode],
+        owners: &std::collections::HashMap<NodeId, NodeId>,
+        hit: NodeId,
+        at: Point<Points>,
+    ) -> Option<NodeId> {
+        if let Some(&receiver) = owners.get(&hit) {
+            return Some(receiver);
+        }
+        nodes
+            .iter()
+            .flat_map(|node| node.hidden_text_spans.iter())
+            .find(|(_, text, start, end)| {
+                *text == hit
+                    && self
+                        .native
+                        .text_bounds(*text, *start, *end)
+                        .is_some_and(|bounds| bounds.contains(&at))
+            })
+            .and_then(|(link, ..)| owners.get(link))
+            .copied()
+    }
+
     /// The view a press at `at` (which natively hit `hit`) goes to: the
     /// innermost listener the platform picks — a pressable span under the
     /// point on a text view, a pressable view itself, or the nearest
@@ -1188,7 +1247,7 @@ impl Agent {
         hit: NodeId,
         at: Point<Points>,
     ) -> Option<NodeId> {
-        if let Some(&receiver) = hidden_press_owners.get(&hit) {
+        if let Some(receiver) = self.hidden_owner_at(nodes, hidden_press_owners, hit, at) {
             return Some(receiver);
         }
         if let Some(node) = by_id.get(&hit).copied() {
@@ -1225,7 +1284,7 @@ impl Agent {
         hit: NodeId,
         at: Point<Points>,
     ) -> Vec<NodeId> {
-        if let Some(&receiver) = hidden_hold_owners.get(&hit) {
+        if let Some(receiver) = self.hidden_owner_at(nodes, hidden_hold_owners, hit, at) {
             return vec![receiver];
         }
         if let Some(node) = by_id.get(&hit).copied() {
@@ -1554,12 +1613,23 @@ impl Agent {
             match self.native.hit_at(at) {
                 Ok(Some(hit))
                     if press_owner.is_some()
-                        && let Some(&receiver) = hidden_press_owners.get(&hit) =>
+                        && let Some(receiver) = self.hidden_owner_at(
+                            &nodes,
+                            if for_long_press {
+                                &hidden_hold_owners
+                            } else {
+                                &hidden_press_owners
+                            },
+                            hit,
+                            at,
+                        ) =>
                 {
                     return Err(format!(
-                        "`{selector}`: a press at ({}, {}) goes to node {receiver}, an \
-                         accessibility-hidden view that takes presses itself",
-                        at.x.0, at.y.0
+                        "`{selector}`: a {} at ({}, {}) goes to node {receiver}, an \
+                         accessibility-hidden view that takes it itself",
+                        if for_long_press { "hold" } else { "press" },
+                        at.x.0,
+                        at.y.0
                     ));
                 }
                 Ok(Some(hit))
@@ -1952,7 +2022,27 @@ impl Agent {
         let hold = match hold {
             Some(hold) => hold,
             None => {
-                let delay = self.scene.long_press_delay(id)?.map_or(LONG_PRESS, |ms| {
+                let delay = self.scene.long_press_delay(id)?;
+                // A synthetic target (a link span) has no delay of its
+                // own: the view owning it does.
+                let delay = match delay {
+                    delay @ Some(_) => delay,
+                    None => {
+                        let owner = self
+                            .scene
+                            .semantic_tree()?
+                            .into_iter()
+                            .find(|node| node.id == id)
+                            .and_then(|node| match node.native_target {
+                                SemanticTarget::Text { owner, .. }
+                                | SemanticTarget::Canvas { owner, .. } => Some(owner),
+                                _ => None,
+                            })
+                            .unwrap_or(id);
+                        self.scene.long_press_delay(owner)?
+                    }
+                }
+                .map_or(LONG_PRESS, |ms| {
                     Duration::from_secs_f64(f64::from(ms.max(0.0)) / 1000.0)
                 });
                 // Hold a little past the delay, as a finger does.
