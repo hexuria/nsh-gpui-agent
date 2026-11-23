@@ -1556,7 +1556,49 @@ impl Agent {
                                     hit,
                                     at,
                                 ) {
-                                    Some(receiver) => receiver == expected,
+                                    Some(receiver) => {
+                                        // The same receiver is not enough: a
+                                        // covering sibling shares the button
+                                        // but the press still missed the
+                                        // target. The hit (or the semantic
+                                        // node it reports through) must be
+                                        // the target or sit inside it — or
+                                        // carry the target inside it, as a
+                                        // synthetic span's owner view does.
+                                        receiver == expected && {
+                                            let mut hit_node = Some(hit);
+                                            let semantic_hit = loop {
+                                                match hit_node {
+                                                    None => break None,
+                                                    Some(id) if by_id.contains_key(&id) => {
+                                                        break Some(id)
+                                                    }
+                                                    Some(id) => {
+                                                        hit_node = nodes
+                                                            .iter()
+                                                            .find(|node| {
+                                                                node.hidden_descendants
+                                                                    .contains(&id)
+                                                            })
+                                                            .map(|node| node.id)
+                                                            .or_else(|| {
+                                                                parents
+                                                                    .get(&id)
+                                                                    .copied()
+                                                                    .flatten()
+                                                            });
+                                                    }
+                                                }
+                                            };
+                                            semantic_hit.is_some_and(|hit_node| {
+                                                is_descendant_or_same(
+                                                    hit_node, target.id, &parents,
+                                                ) || is_descendant_or_same(
+                                                    target.id, hit_node, &parents,
+                                                )
+                                            })
+                                        }
+                                    }
                                     None => is_descendant_or_same(hit, expected, &parents),
                                 }
                             }

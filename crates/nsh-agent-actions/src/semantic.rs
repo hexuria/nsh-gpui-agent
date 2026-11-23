@@ -166,7 +166,11 @@ pub(crate) fn nodes(screen: &Screen) -> Vec<SemanticNode> {
         if hidden {
             // A press on it goes to it, or to the hidden view around
             // it that takes presses, not to `parent`.
-            let hidden_press = if view.events().contains(EventKind::Press) {
+            let hidden_press = if view.events().contains(EventKind::Press)
+                || view.events().contains(EventKind::PressDown)
+                || view.events().contains(EventKind::PressUp)
+                || view.events().contains(EventKind::LongPress)
+            {
                 Some(id)
             } else {
                 hidden_press
@@ -586,6 +590,42 @@ mod tests {
         // Left out, the hidden views still link to the node they are under.
         assert_eq!(nodes[0].hidden_descendants, [12, 13]);
         assert!(nodes[1].hidden_descendants.is_empty());
+    }
+
+    #[test]
+    fn semantic_tree_marks_hidden_views_taking_any_press_phase() {
+        // A hidden view listening only to a press phase (down, up, or the
+        // hold) still owns the gesture there — it is not decorative.
+        for event in [
+            EventKind::Press,
+            EventKind::PressDown,
+            EventKind::PressUp,
+            EventKind::LongPress,
+        ] {
+            let mut screen = Screen::default();
+            screen.apply(&batch(vec![
+                create(10, ViewKind::View),
+                create(11, ViewKind::View),
+                insert(ROOT, 10),
+                insert(10, 11),
+                props(11, |props| props.accessibility.hidden = true),
+                MountItem::Events {
+                    id: 11,
+                    events: {
+                        let mut events = EventMask::default();
+                        events.set(event, true);
+                        events
+                    },
+                },
+            ]));
+
+            let nodes = nodes(&screen);
+            assert_eq!(
+                nodes[1].hidden_press_owners,
+                [(11, 11)],
+                "{event:?} should mark the hidden view as its own press owner"
+            );
+        }
     }
 
     #[test]
