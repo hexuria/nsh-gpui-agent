@@ -766,7 +766,18 @@ mod attachment_tests {
         attachment.model.error("old engine");
         assert!(attachment.agent_running());
         assert_eq!(attachment.model.activity().unwrap().batches, 1);
+        let addr = attachment.worker.borrow().as_ref().unwrap().local_addr();
         drop(guard);
+        // The handle signals shutdown without joining the serve thread, so
+        // poll until the listener is actually gone, not just the flag.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::net::TcpStream::connect(addr).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker listener on {addr} still accepts connections after shutdown"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(!attachment.agent_running());
         assert!(!attachment.available.load(Ordering::Acquire));
         assert_eq!(attachment.model.activity().unwrap().batches, 0);
