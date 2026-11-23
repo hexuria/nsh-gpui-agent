@@ -82,12 +82,15 @@ retains its worker until the surface closes; without the opt-in environment no s
 exposes the in-process tree/action API (`AppViewAgentExt`); feature `gpui-agent-server` also compiles the legacy
 in-process listener. `dev-agent` is on by default here and starts the strict adapter only in debug builds; when
 `gpui-agent-server` is also enabled, the private server owns the listener and no strict worker starts, matching
-buwiz's feature split.
+buwiz's feature split. A release embedding that wants only the in-process API or server should disable default
+features so the development adapter is not linked.
 
 Three differences are imposed by the current pure doors and are not behavior-preserving yet: synthesized input cannot
 be stamped or wrapped for input provenance inside upstream's synth path; the legacy server's settle wait cannot read
 the surface's pending/frame bit and treats it as quiet; and `dropFiles` delegates to upstream rather than preserving
-the pointer's window as buwiz did.
+the pointer's window as buwiz did. Reading the public `NshView::surface` facade can also run upstream's keyboard
+surface routing (`input::enter`) as a side effect, because no pure surface-ownership or window-registry door exists;
+passive hit and ownership scans therefore are not perfectly passive.
 
 ## gpui-agent version
 
