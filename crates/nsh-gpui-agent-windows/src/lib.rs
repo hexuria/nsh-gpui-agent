@@ -107,6 +107,7 @@ fn start_agent(surface: DevSurface, attachment: &Rc<Attachment>) {
         }
     };
     let native = WindowsNative {
+        model: attachment.model.clone(),
         native: surface.native(),
         surface,
         available: attachment.available.clone(),
@@ -135,6 +136,7 @@ fn start_agent(surface: DevSurface, attachment: &Rc<Attachment>) {
 }
 
 struct WindowsNative {
+    model: Arc<Model>,
     native: Box<dyn Native>,
     surface: DevSurface,
     available: Arc<AtomicBool>,
@@ -187,6 +189,7 @@ impl StrictNative for WindowsNative {
     }
 
     fn focus_node(&self, id: NodeId) -> Result<(), String> {
+        require_node(&self.model, id)?;
         self.on_main(move |surface| {
             surface.focus_text_input(id);
             if surface.child_focused() {
@@ -364,6 +367,13 @@ impl Native for WindowsNative {
     }
 }
 
+fn require_node(model: &Model, id: NodeId) -> Result<(), String> {
+    model
+        .screen(|screen| screen.mounted(id).is_some())
+        .then_some(())
+        .ok_or_else(|| format!("node {id} is missing"))
+}
+
 fn windows_key(keys: &str) -> Result<(u16, Modifiers), String> {
     let stroke = nsh_core::keymap::Keystroke::parse(keys, nsh_core::platform::Os::Windows)
         .map_err(|e| e.to_string())?;
@@ -462,6 +472,21 @@ fn resolve_menu_keybinding(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_requires_a_mounted_node() {
+        let model = Model::default();
+        assert_eq!(require_node(&model, 2), Err("node 2 is missing".into()));
+        model.apply(&nsh_core::MountBatch {
+            items: vec![nsh_core::MountItem::Create {
+                id: 2,
+                kind: nsh_core::ViewKind::View,
+            }],
+        });
+        assert_eq!(require_node(&model, 2), Ok(()));
+        model.reset();
+        assert_eq!(require_node(&model, 2), Err("node 2 is missing".into()));
+    }
 
     #[test]
     fn a_late_and_a_lost_call_fail_differently() {
