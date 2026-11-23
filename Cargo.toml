@@ -178,6 +178,8 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
 getrandom = "0.3"
+nsh-platform-linux = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", features = ["dev"] }
+nsh-linux-host = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342" }
 log = "0.4"
 anyhow = "1"
 base64 = "0.22"
