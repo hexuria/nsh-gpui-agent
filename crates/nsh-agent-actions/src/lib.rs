@@ -191,20 +191,21 @@ pub trait SemanticScene: Scene {
         let _ = id;
         Ok(false)
     }
-    /// The view that owns the native press starting on `id`: whatever
-    /// the platform's press pick selects for a press starting there
-    /// (GPUI `pick_press`: `id` or its nearest ancestor listening for
-    /// `Press`, `LongPress`, `PressDown` or `PressUp`). One owner covers
-    /// the whole gesture — a tap and a hold on `id` go to the same view;
-    /// which callback runs depends on how the gesture ends. That owner
-    /// is not always a hold receiver: a view listening only for
-    /// press-down/up takes the press yet never fires a long-press, so
-    /// the answer can name a blocker rather than a handler, and it can
-    /// differ from both the model's tap pick and its hold pick. A view
-    /// that only observes raw touches is no recognizer — the hold still
-    /// reaches an ancestor's — so it does not appear here. `Err` means
-    /// the host cannot say: the agent falls back to the model's
-    /// long-press pick, which counts touch listeners.
+    /// The view the platform hands the long press of a hold starting on
+    /// `id`: `pick_press`'s `long_node` when set, else the picked
+    /// press's `node`. GPUI's pick gives the press to the innermost
+    /// enabled view listening to `Press`, `LongPress`, `PressDown` or
+    /// `PressUp`; when that view listens only to `LongPress`, taps fall
+    /// to the nearest tap-listening ancestor while the long press stays
+    /// with it — this method returns that view, not the tap owner, so
+    /// the answer can differ from both the model's tap pick and its hold
+    /// pick. It can also name a blocker rather than a handler: a view
+    /// listening only for press-down/up takes the press yet never fires
+    /// a long-press. A view that only observes raw touches is no
+    /// recognizer — the hold still reaches an ancestor's — so it does
+    /// not appear here. `Err` means the host cannot say: the agent
+    /// falls back to the model's long-press pick, which counts touch
+    /// listeners.
     fn native_hold_receiver(&self, id: NodeId) -> Result<Option<NodeId>, String> {
         let _ = id;
         Err("the host does not report native hold receivers".into())
