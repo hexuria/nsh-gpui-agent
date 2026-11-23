@@ -347,20 +347,7 @@ function synthesize(event) {
       return;
     }
     if (event.event === "insert_text") {
-      const target = document.activeElement;
-      if (!target || !(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable)) {
-        throw new Error("the focused element is not editable");
-      }
-      let owner;
-      for (let el = target; el; el = el.parentElement) {
-        if (el._id != null && this.views.get(el._id) === el) {
-          owner = el;
-          break;
-        }
-      }
-      const subject = owner ? `node ${owner._id}` : "the focused input";
-      if (target.disabled || owner?._props?.disabled) throw new Error(`${subject} is disabled`);
-      if (target.readOnly) throw new Error(`${subject} is read-only`);
+      const target = editableTarget.call(this);
       if (document.execCommand("insertText", false, event.text)) return;
       if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
         const start = target.selectionStart ?? target.value.length;
@@ -391,8 +378,28 @@ function synthesize(event) {
     }
     throw new Error(`unknown synthetic event ${JSON.stringify(event)}`);
   }
+function editableTarget() {
+  const target = document.activeElement;
+  if (!target || !(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable)) {
+    throw new Error("the focused element is not editable");
+  }
+  let owner;
+  for (let el = target; el; el = el.parentElement) {
+    if (el._id != null && this.views.get(el._id) === el) {
+      owner = el;
+      break;
+    }
+  }
+  const subject = owner ? `node ${owner._id}` : "the focused input";
+  if (target.disabled || owner?._props?.disabled) throw new Error(`${subject} is disabled`);
+  if (target.readOnly) throw new Error(`${subject} is read-only`);
+  return target;
+}
 function question(query) {
 switch (query.query) {
+      case "editable":
+        editableTarget.call(this);
+        return null;
       case "input_text": {
         const field = this.views.get(query.id)?._field;
         // An agent's page shows a masked input as it is drawn: a bullet a
@@ -457,7 +464,7 @@ throw new Error(`unknown page question ${query.query}`);
   if (AGENT) globalThis.nshHelloExtra = AGENT;
 
 const handlers = globalThis.nshPageSteps ??= Object.create(null);
-for (const name of ["hit_at", "focus", "focused", "app_focused", "input_text"]) {
+for (const name of ["hit_at", "focus", "focused", "app_focused", "input_text", "editable"]) {
 handlers[name] = (args, player) => question.call(player, { ...args, query: name });
 }
 handlers.synth = (event, player) => {

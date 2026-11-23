@@ -191,18 +191,22 @@ test("synthetic text refuses read-only and disabled inputs before editing", () =
     },
   };
   try {
+    assert.throws(() => player.testPage({ query: "editable" }), { message: "node 7 is read-only" });
     assert.throws(
       () => player.synthesize({ event: "insert_text", text: "after" }),
       { message: "node 7 is read-only" },
     );
     field.readOnly = false;
     view._props.disabled = true;
+    assert.throws(() => player.testPage({ query: "editable" }), { message: "node 7 is disabled" });
     assert.throws(
       () => player.synthesize({ event: "insert_text", text: "after" }),
       { message: "node 7 is disabled" },
     );
     assert.deepEqual(commands, []);
     assert.equal(field.value, "before");
+    view._props.disabled = false;
+    assert.equal(player.testPage({ query: "editable" }), null);
   } finally {
     for (const [name, value] of Object.entries(saved)) {
       if (value === undefined) delete globalThis[name];

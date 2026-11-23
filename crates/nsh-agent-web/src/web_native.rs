@@ -3,7 +3,10 @@
 //!
 //! [`cdp`]: crate::cdp
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use nsh_core::{
     NodeId,
@@ -53,6 +56,7 @@ pub(crate) struct WebNative {
     /// strict mode asks (hits, focus, text bounds, the keys it can send);
     /// a test's agent keeps the trait's defaults, as before.
     agent: bool,
+    failure: Mutex<Option<String>>,
 }
 
 pub(crate) struct WebScene {
@@ -211,6 +215,7 @@ impl WebNative {
             scene: WebScene::new(server.clone(), false),
             server,
             agent,
+            failure: Mutex::new(None),
         }
     }
 
@@ -223,6 +228,11 @@ impl WebNative {
         if let Err(err) = self.page.call(method, params) {
             log::warn!("{err}");
         }
+    }
+
+    fn edit(&self, edit: impl FnOnce()) {
+        let allowed = self.scene.page::<Value>("editable", json!({})).map(drop);
+        edit_if_allowed(&self.failure, allowed, edit);
     }
 
     fn mouse(&self, kind: &str, at: Point<Points>, buttons: u32) {
@@ -476,25 +486,26 @@ impl Native for WebNative {
     }
 
     fn type_text(&self, text: &str) {
-        for ch in text.chars() {
-            let ch = ch.to_string();
-            self.call(
-                "Input.dispatchKeyEvent",
-                json!({ "type": "keyDown", "key": ch, "text": ch, "unmodifiedText": ch }),
-            );
-            self.call(
-                "Input.dispatchKeyEvent",
-                json!({ "type": "keyUp", "key": ch }),
-            );
-        }
+        self.edit(|| {
+            for ch in text.chars() {
+                let ch = ch.to_string();
+                self.call(
+                    "Input.dispatchKeyEvent",
+                    json!({ "type": "keyDown", "key": ch, "text": ch, "unmodifiedText": ch }),
+                );
+                self.call(
+                    "Input.dispatchKeyEvent",
+                    json!({ "type": "keyUp", "key": ch }),
+                );
+            }
+        });
     }
 
     fn key(&self, key: Key) {
         match key {
             Key::Return => self.press_key("Enter", "Enter", 13, 0, &[], None),
-            Key::Backspace => {
-                self.press_key("Backspace", "Backspace", 8, 0, &["deleteBackward"], None)
-            }
+            Key::Backspace => self
+                .edit(|| self.press_key("Backspace", "Backspace", 8, 0, &["deleteBackward"], None)),
             Key::SelectAll => {
                 // The platform's command key: Command on macOS, else Ctrl.
                 let (name, code, vk, bit) = if cfg!(target_os = "macos") {
@@ -592,6 +603,13 @@ impl Native for WebNative {
 }
 
 impl nsh_agent_actions::StrictNative for WebNative {
+    fn take_failure(&self) -> Option<String> {
+        self.failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
     fn available(&self) -> bool {
         !self.agent
             || (!self.page.closed() && self.page.browser().alive() && self.server.has_tester())
@@ -623,9 +641,41 @@ impl nsh_agent_actions::StrictNative for WebNative {
     }
 }
 
+fn edit_if_allowed(
+    failure: &Mutex<Option<String>>,
+    allowed: Result<(), String>,
+    edit: impl FnOnce(),
+) {
+    match allowed {
+        Ok(()) => edit(),
+        Err(error) => *failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::browser_keys;
+    use super::{browser_keys, edit_if_allowed};
+    use std::{cell::Cell, sync::Mutex};
+
+    #[test]
+    fn refused_edits_leave_the_value_and_report_a_native_failure() {
+        for error in [
+            "node 7 is read-only",
+            "node 7 is disabled",
+            "the focused element is not editable",
+        ] {
+            let value = Cell::new("before");
+            let failure = Mutex::new(None);
+            edit_if_allowed(&failure, Err(error.into()), || value.set("after"));
+            assert_eq!(value.get(), "before");
+            assert_eq!(failure.lock().unwrap().take().as_deref(), Some(error));
+        }
+        let failure = Mutex::new(None);
+        let value = Cell::new("");
+        edit_if_allowed(&failure, Ok(()), || value.set("after"));
+        assert_eq!(value.get(), "after");
+        assert!(failure.lock().unwrap().is_none());
+    }
 
     #[test]
     fn keys_a_browser_has_are_sent_as_its_keys() {
