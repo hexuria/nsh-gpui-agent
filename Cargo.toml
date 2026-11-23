@@ -21,9 +21,13 @@ gpui-agent = "=0.3.0"
 # One NSH per build: every nsh-* crate comes from branch `gpui-agent` of the
 # fork, pinned to the tested commit (see README.md, "Which NSH to use"). An app that builds NSH from its
 # own checkout redirects these with `[patch."https://github.com/hexuria/nsh"]`.
-nsh-core = { git = "https://github.com/hexuria/nsh", rev = "b609258a57ff1e8eefae34a7733f69bfca5fda0c" }
-nsh-dev = { git = "https://github.com/hexuria/nsh", rev = "b609258a57ff1e8eefae34a7733f69bfca5fda0c" }
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "b609258a57ff1e8eefae34a7733f69bfca5fda0c", default-features = false }
+nsh-core = { git = "https://github.com/hexuria/nsh", rev = "0816728ee37764819c537cbe3eb158b7b88f9254" }
+nsh-dev = { git = "https://github.com/hexuria/nsh", rev = "0816728ee37764819c537cbe3eb158b7b88f9254" }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "0816728ee37764819c537cbe3eb158b7b88f9254", default-features = false }
+nsh-platform-ios = { git = "https://github.com/hexuria/nsh", rev = "0816728ee37764819c537cbe3eb158b7b88f9254", features = ["dev"] }
+objc2 = "0.6.5"
+objc2-core-foundation = "0.3.2"
+objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["std", "UIApplication", "UIResponder", "UIView", "UIWindow"] }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

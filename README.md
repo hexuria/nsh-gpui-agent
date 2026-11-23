@@ -26,7 +26,8 @@ and take screenshots, over a loopback connection the app opens only when it is t
 | Branch | `gpui-agent` |
 | What it is | An upstream release of `longbridge/nsh` plus a small set of doors, and nothing else |
 | Upstream release it sits on | `v0.6.1` (`2f51d8611`) |
-| Commit this repository is tested with | [`b609258a5`](https://github.com/hexuria/nsh/commit/b609258a57ff1e8eefae34a7733f69bfca5fda0c) |
+| Dependency pin (iOS compile-checked) | [`0816728ee`](https://github.com/hexuria/nsh/commit/0816728ee37764819c537cbe3eb158b7b88f9254) |
+| Last Stage 0 headless test run | [`b609258a5`](https://github.com/hexuria/nsh/commit/b609258a57ff1e8eefae34a7733f69bfca5fda0c) |
 | The doors | `SOCKET.md` at the root of that branch lists every one |
 
 A *door* is a small change that makes something in NSH public: an accessor, or a hook that calls out. A door holds
@@ -37,7 +38,7 @@ The branch is rebased onto each new upstream release, so depend on a commit, not
 
 ```toml
 [dependencies]
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "b609258a57ff1e8eefae34a7733f69bfca5fda0c", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "0816728ee37764819c537cbe3eb158b7b88f9254", default-features = false, features = ["agent"] }
 ```
 
 ## Using it from an app
@@ -51,7 +52,7 @@ builds NSH from its own checkout must point this repository's NSH at that same c
 nsh-core    = { path = "../nsh/crates/nsh-core" }
 nsh-testing = { path = "../nsh/crates/nsh-testing" }
 nsh-dev     = { path = "../nsh/crates/nsh-dev" }
-# nsh-core, nsh-dev and nsh-testing are the nsh-* crates this repository depends on
+nsh-platform-ios = { path = "../nsh/crates/nsh-platform-ios" } # when enabling ios
 ```
 
 The app's NSH must contain everything branch `gpui-agent` has. Our own app line, `hexuria/nsh` branch `buwiz-next`,
@@ -72,8 +73,29 @@ Filled in from real runs on each platform's own machine. Headless tests on Linux
 | Linux | not run yet | |
 | Windows | not run yet | |
 | Android | not run yet | |
-| iOS | not run yet | |
+| iOS | surface hook and strict native adapter moved; Simulator run pending | Not yet runtime-verified |
 | Web | not run yet | |
+
+### iOS integration (not yet live-verified)
+
+Enable this crate's `ios` feature and call `nsh_gpui_agent::ios::install()` before
+the development host starts. A custom host can then call `nsh_ios_host::main()`.
+The hook receives `nsh_platform_ios::dev::DevelopmentSurface` and retains one
+mobile adapter worker and model for each opted-in session. Native input uses
+NSH's existing driver; liveness, focus and native hit-testing are implemented
+here. Ordinary `nsh test` keeps its separate model and driver.
+
+The simulator-only, debug-only opt-in and private one-use token file are the same
+as on `buwiz`: `GPUI_AGENT=1`, a loopback `GPUI_AGENT_ADDR`, and
+`Library/Caches/gpui-agent-token` in the app's data container. Screenshots stay
+confined to `Library/Caches/gpui-agent`; use `screenshot --inline` to save on the Mac.
+
+**Still pending:** the stock `nsh run` host does not link this plug or call
+`ios::install()`. Its upstream launcher also lacks `buwiz`'s private token-file
+handoff. Those must be connected before the gallery command can serve an agent;
+setting `GPUI_AGENT=1` alone does not enable one on the socket branch. Startup
+errors currently log locally rather than appearing in the development overlay.
+Simulator actions, screenshots, ordinary iOS tests and clippy have not been run.
 
 ## License
 
