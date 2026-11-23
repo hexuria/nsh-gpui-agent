@@ -18,10 +18,11 @@ use nsh_core::{
 };
 use nsh_platform_macos::{
     agent::MacNative,
-    input,
+    file_drop, input,
     surface::Surface,
     synth, text_input,
     view::{NshView, superview},
+    window,
 };
 use nsh_testing::agent::{Key, Native, SystemName};
 use objc2::{MainThreadMarker, Message};
@@ -77,16 +78,8 @@ impl MacStrictNative {
             };
             let window = match which {
                 Which::Main => surface.root().ns().window(),
-                Which::Target(ROOT_ID) => surface.root().ns().window(),
-                Which::Target(id) => target_view(&surface, id).and_then(|view| view.ns().window()),
-                Which::Key => {
-                    let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-                    let app = NSApplication::sharedApplication(mtm);
-                    match app.keyWindow() {
-                        Some(window) if window_belongs(&window, &surface) => Some(window),
-                        _ => surface.root().ns().window(),
-                    }
-                }
+                Which::Target(id) => window::window_of(&surface, id),
+                Which::Key => window::key_window(&surface),
             };
             let Some(window) = window else {
                 return;
@@ -123,94 +116,39 @@ fn find_view(root: &NshView, id: NodeId) -> Option<NshView> {
     None
 }
 
-fn window_belongs(window: &NSWindow, surface: &Rc<Surface>) -> bool {
-    window
-        .contentView()
-        .is_some_and(|content| native_belongs(&content, surface))
-}
-
-fn native_belongs(ns: &NSView, surface: &Rc<Surface>) -> bool {
-    if NshView::from_ns(ns)
-        .and_then(|view| view.surface())
-        .is_some_and(|owner| Rc::ptr_eq(&owner, surface))
-    {
-        return true;
-    }
-    ns.subviews()
-        .iter()
-        .any(|subview| native_belongs(&subview, surface))
-}
-
 fn target_view(surface: &Rc<Surface>, id: NodeId) -> Option<NshView> {
-    find_view(&surface.root(), id).or_else(|| {
-        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-        NSApplication::sharedApplication(mtm)
-            .windows()
-            .iter()
-            .find_map(|window| {
-                let content = window.contentView()?;
-                find_native_view(&content, id, surface)
-            })
-    })
-}
-
-fn find_native_view(ns: &NSView, id: NodeId, surface: &Rc<Surface>) -> Option<NshView> {
-    if let Some(view) = NshView::from_ns(ns)
-        && view.id() == id
-        && view
-            .surface()
-            .is_some_and(|owner| Rc::ptr_eq(&owner, surface))
-    {
+    if let Some(view) = find_view(&surface.root(), id) {
         return Some(view);
     }
-    for subview in ns.subviews().iter() {
-        if let Some(view) = find_native_view(&subview, id, surface) {
+    for root in window::roots(surface) {
+        if let Some(view) = find_view(&root, id) {
             return Some(view);
         }
     }
     None
 }
 
-fn pad_owner(surface: &Rc<Surface>, hit: &NSView) -> Option<NodeId> {
-    let mut pad = None;
-    walk(&surface.root(), &mut |view| {
+fn scan_pads(root: &NshView, hit: &NSView, pad: &mut Option<NodeId>) {
+    walk(root, &mut |view| {
         if pad.is_none()
             && view
                 .input()
                 .is_some_and(|input| text_input::pad_owns(&input, hit))
         {
-            pad = Some(view.id());
+            *pad = Some(view.id());
         }
     });
-    pad.or_else(|| {
-        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-        NSApplication::sharedApplication(mtm)
-            .windows()
-            .iter()
-            .find_map(|window| {
-                let content = window.contentView()?;
-                pad_in_native(&content, hit, surface)
-            })
-    })
 }
 
-fn pad_in_native(ns: &NSView, hit: &NSView, surface: &Rc<Surface>) -> Option<NodeId> {
-    if let Some(view) = NshView::from_ns(ns)
-        && view
-            .input()
-            .is_some_and(|input| text_input::pad_owns(&input, hit))
-        && view
-            .surface()
-            .is_some_and(|owner| Rc::ptr_eq(&owner, surface))
-    {
-        return Some(view.id());
-    }
-    for subview in ns.subviews().iter() {
-        if let Some(id) = pad_in_native(&subview, hit, surface) {
-            return Some(id);
+fn pad_owner(surface: &Rc<Surface>, hit: &NSView) -> Option<NodeId> {
+    let mut pad = None;
+    scan_pads(&surface.root(), hit, &mut pad);
+    if pad.is_none() {
+        for root in window::roots(surface) {
+            scan_pads(&root, hit, &mut pad);
         }
     }
-    None
+    pad
 }
 
 impl StrictNative for MacStrictNative {
@@ -364,7 +302,7 @@ impl Native for MacStrictNative {
         // Straight to the surface's input: AppKit hands a posted mouse
         // move to the first responder only, not to the view under it.
         self.on_target(move |surface, window| {
-            let event = synth::mouse_event(
+            let event = crate::synth::mouse_event(
                 window,
                 NSEventType::MouseMoved,
                 x,
@@ -375,7 +313,7 @@ impl Native for MacStrictNative {
             if let Some(event) = event {
                 let target = self.target();
                 let root = (target != ROOT_ID)
-                    .then(|| target_view(surface, target))
+                    .then(|| window::root_view(surface, target))
                     .flatten();
                 // The window stays the input's, as after a real move: what
                 // the hover changes is picked again where the pointer is,
@@ -428,7 +366,28 @@ impl Native for MacStrictNative {
     }
 
     fn drop_files(&self, at: Point<Points>, uris: Vec<String>) -> Result<(), String> {
-        self.inner.drop_files(at, uris)
+        let (x, y) = (at.x.0, at.y.0);
+        let target = self.target();
+        let dropped = self.on_target(move |surface, _| {
+            let root = (target != ROOT_ID)
+                .then(|| window::root_view(surface, target))
+                .flatten();
+            // The agent's drop does not move the pointer (`input.last`):
+            // the window it was in stays the input's, so what the drop
+            // changes is picked again where the pointer is (a hover in
+            // this window included), not in the main window.
+            let event_root = input::event_root(surface);
+            let pointer = (event_root != surface.root()).then_some(event_root);
+            input::enter(surface, root);
+            let dropped = file_drop::drop_uris(surface, x, y, uris);
+            input::enter(surface, pointer);
+            dropped
+        });
+        match dropped {
+            Some(true) => Ok(()),
+            Some(false) => Err("no view there listens to `onFileDrop`".into()),
+            None => Err("the window is gone".into()),
+        }
     }
 
     fn drop_at(&self, at: Point<Points>) -> Result<(), String> {
@@ -457,9 +416,9 @@ impl Native for MacStrictNative {
         // keys go to; its window is where the pointer last was.
         self.on_key(|surface, window| {
             if text_input::editing_in(&input::root_in(surface, window)) {
-                synth::key(surface, window, "Escape");
+                crate::synth::key(surface, window, "Escape");
             }
-            synth::key(surface, window, "Escape");
+            crate::synth::key(surface, window, "Escape");
         })
         .ok_or_else(|| "the window is gone".to_owned())
     }

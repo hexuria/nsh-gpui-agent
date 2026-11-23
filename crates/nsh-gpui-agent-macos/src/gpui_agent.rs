@@ -1575,12 +1575,12 @@ fn step(
                 });
             }
             match &action.gesture {
-                Gesture::Type(text) => synth::type_text(surface, &window, text),
+                Gesture::Type(text) => crate::synth::type_text(surface, &window, text),
                 Gesture::SetValue(value) => {
-                    synth::key(surface, &window, "cmd+a");
-                    synth::type_text(surface, &window, value);
+                    crate::synth::key(surface, &window, "cmd+a");
+                    crate::synth::type_text(surface, &window, value);
                 }
-                Gesture::Key(key) => synth::key(surface, &window, key),
+                Gesture::Key(key) => crate::synth::key(surface, &window, key),
                 _ => {}
             }
             *phase = Phase::Settle(Settle::new(SETTLE, Reply::Action));
@@ -1911,9 +1911,9 @@ fn focused_in(view: &NshView, window: &NSWindow) -> bool {
 fn perform(scope: &Scope, window: &NSWindow, gesture: &Gesture, x: f64, y: f64) {
     match *gesture {
         Gesture::Press | Gesture::Type(_) | Gesture::SetValue(_) | Gesture::Key(_) => {
-            synth::mouse(window, NSEventType::MouseMoved, x, y, 0);
-            synth::mouse(window, NSEventType::LeftMouseDown, x, y, 1);
-            synth::mouse(window, NSEventType::LeftMouseUp, x, y, 1);
+            crate::synth::mouse(window, NSEventType::MouseMoved, x, y, 0);
+            crate::synth::mouse(window, NSEventType::LeftMouseDown, x, y, 1);
+            crate::synth::mouse(window, NSEventType::LeftMouseUp, x, y, 1);
         }
         Gesture::Hover => hover(scope, window, x, y),
         Gesture::Drag { dx, dy } => drag(window, x, y, dx, dy),
@@ -1924,12 +1924,12 @@ fn perform(scope: &Scope, window: &NSWindow, gesture: &Gesture, x: f64, y: f64) 
 /// A user's drag: hover, down, a run of dragged steps to `(dx, dy)` away
 /// (pan gestures need a travel, not one jump), up at the end.
 fn drag(window: &NSWindow, x0: f64, y0: f64, dx: f64, dy: f64) {
-    synth::mouse(window, NSEventType::MouseMoved, x0, y0, 0);
-    synth::mouse(window, NSEventType::LeftMouseDown, x0, y0, 1);
+    crate::synth::mouse(window, NSEventType::MouseMoved, x0, y0, 0);
+    crate::synth::mouse(window, NSEventType::LeftMouseDown, x0, y0, 1);
     const STEPS: usize = 6;
     for i in 1..=STEPS {
         let t = i as f64 / STEPS as f64;
-        synth::mouse(
+        crate::synth::mouse(
             window,
             NSEventType::LeftMouseDragged,
             x0 + dx * t,
@@ -1937,7 +1937,7 @@ fn drag(window: &NSWindow, x0: f64, y0: f64, dx: f64, dy: f64) {
             1,
         );
     }
-    synth::mouse(window, NSEventType::LeftMouseUp, x0 + dx, y0 + dy, 1);
+    crate::synth::mouse(window, NSEventType::LeftMouseUp, x0 + dx, y0 + dy, 1);
 }
 
 /// A pointer move with no press, over the target's surface and the ones
@@ -1947,7 +1947,7 @@ fn hover(scope: &Scope, window: &NSWindow, x: f64, y: f64) {
     // `postEvent` drops `MouseMoved` when the window's
     // `acceptsMouseMovedEvents` is off (tracking areas opt real moves in,
     // not posted ones): dispatch it through the input path itself.
-    if let Some(event) = synth::mouse_event(
+    if let Some(event) = crate::synth::mouse_event(
         window,
         NSEventType::MouseMoved,
         x,
@@ -2218,7 +2218,7 @@ fn keybinding(surface: &Rc<Surface>, request: KeybindingRequest<'_>) -> Result<(
         window.makeKeyAndOrderFront(None);
     }
     match &binding.fire {
-        Fire::Keys(keys) => synth::key(surface, &window, keys),
+        Fire::Keys(keys) => crate::synth::key(surface, &window, keys),
         Fire::Menu(path) => {
             let mut menu = app.mainMenu().ok_or("the app has no menu")?;
             let (last, parents) = path.split_last().ok_or("an empty menu path")?;

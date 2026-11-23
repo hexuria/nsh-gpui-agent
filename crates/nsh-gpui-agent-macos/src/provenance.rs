@@ -126,10 +126,6 @@ pub(crate) fn synth_is_person() {
 }
 
 /// Runs `f`, which hands a synthesized key event to the app.
-#[cfg(all(feature = "gpui-agent", test))]
-// The upstream synth path cannot call out through a pure door; retain
-// the copied wrapper for the provenance tests that exercise it directly.
-#[allow(dead_code)]
 pub(crate) fn synth_key(f: impl FnOnce()) {
     let old = SYNTH_KEY.replace(true);
     f();

@@ -43,6 +43,7 @@ pub mod provenance;
 
 pub use provenance::{Input, on_input};
 mod strict;
+mod synth;
 
 #[cfg(feature = "gpui-agent")]
 #[cfg_attr(not(feature = "gpui-agent-server"), allow(dead_code, unused_imports))]
@@ -130,9 +131,8 @@ fn start_strict_worker(
 
 /// The batch count and pending-work bit the legacy server settles on.
 ///
-/// Upstream keeps the pending bit inside `Surface`; it cannot be a pure
-/// door. The plug uses the hook model for batch revisions and treats the
-/// unavailable pending bit as quiet.
+/// The hook model counts applied batches; the surface's doors expose the
+/// engine input and frame/animation state buwiz's `Surface::activity` read.
 #[cfg(feature = "gpui-agent")]
 pub(crate) fn model_activity(key: u64) -> (u64, bool) {
     use nsh_testing::agent::Scene;
@@ -144,7 +144,9 @@ pub(crate) fn model_activity(key: u64) -> (u64, bool) {
     let batches = model
         .and_then(|model| model.activity().ok().map(|activity| activity.batches))
         .unwrap_or(0);
-    (batches, false)
+    let busy = Surface::with_key(key)
+        .is_some_and(|surface| surface.input_pending() || surface.wants_frames());
+    (batches, busy)
 }
 
 /// The semantic model the surface hook attached, for the crate's native
