@@ -157,8 +157,13 @@ fn open(page: &Page, server: &DevServer, key: String) -> Result<(), String> {
         "Page.addScriptToEvaluateOnNewDocument",
         json!({
             "source": format!(
-                "Object.defineProperty(globalThis, '__nshAgentKey', \
+                "if (location.origin === {}) \
+                 Object.defineProperty(globalThis, '__nshAgentKey', \
                  {{ value: {}, configurable: true }});",
+                serde_json::Value::from(format!(
+                    "http://127.0.0.1:{}",
+                    server.local_addr().port()
+                )),
                 serde_json::Value::from(key)
             ),
         }),
