@@ -49,6 +49,19 @@ pub const NATIVE_FOCUS_UNSUPPORTED: &str = "native focus is unsupported on this 
 pub const NATIVE_KEYBINDING_UNSUPPORTED: &str =
     "native keybinding dispatch is unsupported on this platform";
 
+/// A swipe's direction on the surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwipeDirection {
+    /// Towards the top edge.
+    Up,
+    /// Towards the bottom edge.
+    Down,
+    /// Towards the left edge.
+    Left,
+    /// Towards the right edge.
+    Right,
+}
+
 /// The native destination represented by a semantic node.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 #[non_exhaustive]
@@ -316,6 +329,33 @@ fn intersection(left: Bounds<Points>, right: Bounds<Points>) -> Option<Bounds<Po
     })
 }
 
+/// Two chord strings name the same shortcut when their parts match after
+/// folding case and common key-name aliases — catalogue spellings like
+/// `ctrl+escape` and `⌃⎋` would otherwise look like different chords and
+/// let a shared one go out as plain keys.
+fn normalize_chord(chord: &str) -> Vec<String> {
+    let mut parts: Vec<String> = chord
+        .split(['+', '-'])
+        .map(|part| {
+            let part = part.trim().to_lowercase();
+            match part.as_str() {
+                "esc" | "⎋" => "escape".to_string(),
+                "cmd" | "command" | "⌘" | "super" | "win" | "windows" => "meta".to_string(),
+                "ctl" | "control" | "⌃" => "ctrl".to_string(),
+                "opt" | "option" | "⌥" => "alt".to_string(),
+                "⇧" => "shift".to_string(),
+                "return" | "↵" | "⏎" => "enter".to_string(),
+                "del" => "delete".to_string(),
+                "spacebar" | "␣" => "space".to_string(),
+                _ => part,
+            }
+        })
+        .filter(|part| !part.is_empty())
+        .collect();
+    parts.sort();
+    parts
+}
+
 /// What a press on `target` goes to: itself when it is an input or
 /// pressable, else its nearest pressable ancestor (`None`: nothing takes it).
 fn press_owner(nodes: &[SemanticNode], target: &SemanticNode) -> Option<NodeId> {
@@ -552,6 +592,7 @@ impl Agent {
             &selector,
             Some(owner),
             false,
+            false,
         )?;
         self.native.press(at);
         self.settled()
@@ -670,10 +711,9 @@ impl Agent {
             .ok_or_else(|| format!("unknown binding `{binding}`"))?;
         if entry.menu_path.is_some() {
             self.native.fire_menu_keybinding(entry)?;
-        } else if bindings
-            .iter()
-            .any(|other| other.id != entry.id && other.chord == entry.chord)
-        {
+        } else if bindings.iter().any(|other| {
+            other.id != entry.id && normalize_chord(&other.chord) == normalize_chord(&entry.chord)
+        }) {
             self.native.fire_keybinding(entry)?;
         } else {
             self.native.press_keys(&entry.chord)?;
@@ -737,6 +777,82 @@ impl Agent {
     /// Drags from a checked native point to an on-screen point.
     pub fn drag_at(&self, from: Point<Points>, to: Point<Points>) -> Result<(), String> {
         let (_, from) = self.checked_point_target(from, PointActionability::Any)?;
+        self.drag_checked(
+            from,
+            Point::new(Points(to.x.0 - from.x.0), Points(to.y.0 - from.y.0)),
+        )
+    }
+
+    /// Drags a checked node `id` `distance` points in `direction`: the
+    /// default, 40% of the viewport, only as far as fits from the checked
+    /// origin.
+    pub fn swipe_node(
+        &self,
+        id: NodeId,
+        direction: SwipeDirection,
+        distance: Option<f32>,
+    ) -> Result<(), String> {
+        let selector = format!("node {id}");
+        let _ = self.node_point(id)?;
+        self.settled()?;
+        let origin = self.node_point_without_reveal(id, &selector)?;
+        let delta = self.swipe_delta(origin, direction, distance)?;
+        self.drag_checked(origin, delta)
+    }
+
+    /// [`Agent::swipe_node`] for a swipe starting at coordinate `from`.
+    pub fn swipe_at(
+        &self,
+        from: Point<Points>,
+        direction: SwipeDirection,
+        distance: Option<f32>,
+    ) -> Result<(), String> {
+        let (_, origin) = self.checked_point_target(from, PointActionability::Any)?;
+        let delta = self.swipe_delta(origin, direction, distance)?;
+        self.drag_checked(origin, delta)
+    }
+
+    /// The swipe's displacement: `distance` when given, else 40% of the
+    /// viewport clamped to the room `origin` leaves in `direction`, so the
+    /// endpoint stays inside the surface.
+    fn swipe_delta(
+        &self,
+        origin: Point<Points>,
+        direction: SwipeDirection,
+        distance: Option<f32>,
+    ) -> Result<Point<Points>, String> {
+        let viewport = self.native.viewport();
+        let (width, height) = (viewport.width.0, viewport.height.0);
+        let horizontal = matches!(direction, SwipeDirection::Left | SwipeDirection::Right);
+        let distance = match distance {
+            Some(distance) if distance.is_finite() && distance > 0.0 => distance,
+            Some(_) => return Err("swipe distance must be finite and positive".into()),
+            None => {
+                let base = (if horizontal { width } else { height }) * 0.4;
+                let room = match direction {
+                    SwipeDirection::Up => origin.y.0,
+                    SwipeDirection::Down => height - origin.y.0,
+                    SwipeDirection::Left => origin.x.0,
+                    SwipeDirection::Right => width - origin.x.0,
+                } - 1.0;
+                base.min(room.max(1.0))
+            }
+        };
+        Ok(match direction {
+            SwipeDirection::Up => Point::new(Points(0.0), Points(-distance)),
+            SwipeDirection::Down => Point::new(Points(0.0), Points(distance)),
+            SwipeDirection::Left => Point::new(Points(-distance), Points(0.0)),
+            SwipeDirection::Right => Point::new(Points(distance), Points(0.0)),
+        })
+    }
+
+    /// Drags from `origin` by `delta`, refusing an offscreen or
+    /// untargetable destination.
+    fn drag_checked(&self, origin: Point<Points>, delta: Point<Points>) -> Result<(), String> {
+        let to = Point::new(
+            Points(origin.x.0 + delta.x.0),
+            Points(origin.y.0 + delta.y.0),
+        );
         let viewport = self.native.viewport();
         if to.x.0 < 0.0 || to.y.0 < 0.0 || to.x.0 >= viewport.width.0 || to.y.0 >= viewport.height.0
         {
@@ -745,7 +861,7 @@ impl Agent {
         if self.native.hit_at(to)?.is_none() {
             return Err("drag destination is offscreen or unavailable".into());
         }
-        self.native.drag(from, to);
+        self.native.drag(origin, to);
         self.settled()
     }
 
@@ -827,20 +943,7 @@ impl Agent {
                 self.node_point_without_reveal(id, &selector)?
             }
         };
-        let to = Point::new(
-            Points(origin.x.0 + delta.x.0),
-            Points(origin.y.0 + delta.y.0),
-        );
-        let viewport = self.native.viewport();
-        if to.x.0 < 0.0 || to.y.0 < 0.0 || to.x.0 >= viewport.width.0 || to.y.0 >= viewport.height.0
-        {
-            return Err("drag destination is offscreen".into());
-        }
-        if self.native.hit_at(to)?.is_none() {
-            return Err("drag destination is offscreen or unavailable".into());
-        }
-        self.native.drag(origin, to);
-        self.settled()
+        self.drag_checked(origin, delta)
     }
 
     /// Resizes the native content viewport, rejecting invalid dimensions.
@@ -975,6 +1078,7 @@ impl Agent {
                 &selector,
                 Some(action_target),
                 true,
+                true,
             )?
         } else {
             self.explicit_actionable_point(target, id, at, &selector)?
@@ -1036,6 +1140,59 @@ impl Agent {
                 return press_owner(nodes, node);
             }
             current = parents.get(&id).copied().flatten();
+        }
+        None
+    }
+
+    /// [`Agent::press_receiver`] for a hold: the receiver of the view that
+    /// would hear a long press starting at `at`.
+    fn hold_receiver(
+        &self,
+        nodes: &[SemanticNode],
+        by_id: &std::collections::HashMap<NodeId, &SemanticNode>,
+        parents: &std::collections::HashMap<NodeId, Option<NodeId>>,
+        hidden_press_owners: &std::collections::HashMap<NodeId, NodeId>,
+        hit: NodeId,
+        at: Point<Points>,
+    ) -> Option<NodeId> {
+        if let Some(&receiver) = hidden_press_owners.get(&hit) {
+            return Some(receiver);
+        }
+        if let Some(node) = by_id.get(&hit).copied() {
+            if let Ok(Some((_, receiver))) = self.long_pressable_span_at(nodes, hit, at) {
+                return Some(receiver);
+            }
+            return self.hold_owner(nodes, node);
+        }
+        // A decorative hidden view: its hold goes where its semantic
+        // owner's would.
+        let mut current = parents.get(&hit).copied().flatten();
+        while let Some(id) = current {
+            if let Some(&receiver) = hidden_press_owners.get(&id) {
+                return Some(receiver);
+            }
+            if let Some(node) = by_id.get(&id) {
+                return self.hold_owner(nodes, node);
+            }
+            current = parents.get(&id).copied().flatten();
+        }
+        None
+    }
+
+    /// What a hold on `target` goes to: the receiver the platform picks
+    /// when the view is long-pressable, an enabled input itself (text
+    /// selection), else the nearest hold-capable ancestor.
+    fn hold_owner(&self, nodes: &[SemanticNode], target: &SemanticNode) -> Option<NodeId> {
+        let mut current = Some(target.id);
+        while let Some(id) = current {
+            let node = nodes.iter().find(|node| node.id == id)?;
+            if let Ok(Pick::One(receiver)) = self.long_pressable(id) {
+                return Some(receiver);
+            }
+            if node.input && node.enabled {
+                return Some(node.id);
+            }
+            current = node.parent;
         }
         None
     }
@@ -1169,7 +1326,15 @@ impl Agent {
         fallback: Point<Points>,
         selector: &str,
     ) -> Result<Point<Points>, String> {
-        self.actionable_point_with_press_owner(id, native_owner, fallback, selector, None, false)
+        self.actionable_point_with_press_owner(
+            id,
+            native_owner,
+            fallback,
+            selector,
+            None,
+            false,
+            false,
+        )
     }
 
     /// [`Agent::actionable_point`] for a point the caller chose: outside
@@ -1181,9 +1346,10 @@ impl Agent {
         at: Point<Points>,
         selector: &str,
     ) -> Result<Point<Points>, String> {
-        self.actionable_point_with_press_owner(id, native_owner, at, selector, None, true)
+        self.actionable_point_with_press_owner(id, native_owner, at, selector, None, true, false)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn actionable_point_with_press_owner(
         &self,
         id: NodeId,
@@ -1192,6 +1358,7 @@ impl Agent {
         selector: &str,
         press_owner: Option<NodeId>,
         explicit: bool,
+        for_long_press: bool,
     ) -> Result<Point<Points>, String> {
         if !self.require_hit_test {
             return Ok(fallback);
@@ -1293,14 +1460,30 @@ impl Agent {
                         // owner view's hit, and decorative views (no press
                         // receiver of their own) under the target still count.
                         Some(expected) => {
-                            match self.press_receiver(
-                                &nodes,
-                                &by_id,
-                                &parents,
-                                &hidden_press_owners,
-                                hit,
-                                at,
-                            ) {
+                            // A hold's hit check resolves receivers by the
+                            // long-press rules — an input or a long-press-only
+                            // child inside a tappable parent takes the hold
+                            // itself — not by the press rules.
+                            let receiver = if for_long_press {
+                                self.hold_receiver(
+                                    &nodes,
+                                    &by_id,
+                                    &parents,
+                                    &hidden_press_owners,
+                                    hit,
+                                    at,
+                                )
+                            } else {
+                                self.press_receiver(
+                                    &nodes,
+                                    &by_id,
+                                    &parents,
+                                    &hidden_press_owners,
+                                    hit,
+                                    at,
+                                )
+                            };
+                            match receiver {
                                 Some(receiver) => receiver == expected,
                                 None => is_descendant_or_same(hit, expected, &parents),
                             }
@@ -1585,6 +1768,7 @@ impl Agent {
             selector,
             Some(id),
             false,
+            true,
         )?;
         self.hold_long_press(id, at, hold)
     }

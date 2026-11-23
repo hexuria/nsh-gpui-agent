@@ -412,53 +412,31 @@ impl NshAgentHost {
         direction: gpui_agent::SwipeDirection,
         distance: Option<f64>,
     ) -> Result<DispatchResult, String> {
-        let viewport = self.agent.native_viewport();
-        let (width, height) = (viewport.width.0, viewport.height.0);
-        let horizontal = matches!(
-            direction,
-            gpui_agent::SwipeDirection::Left | gpui_agent::SwipeDirection::Right
-        );
         let explicit = match distance {
             Some(distance) if distance.is_finite() && distance > 0.0 => Some(distance as f32),
             Some(_) => return Err("swipe distance must be finite and positive".into()),
             None => None,
         };
-        let (from, node) = match target {
+        let direction = match direction {
+            gpui_agent::SwipeDirection::Up => nsh_agent_actions::SwipeDirection::Up,
+            gpui_agent::SwipeDirection::Down => nsh_agent_actions::SwipeDirection::Down,
+            gpui_agent::SwipeDirection::Left => nsh_agent_actions::SwipeDirection::Left,
+            gpui_agent::SwipeDirection::Right => nsh_agent_actions::SwipeDirection::Right,
+        };
+        match target {
             Some(target) => {
                 let id = self.node_id(target)?;
-                let bounds = self
-                    .agent
-                    .native_bounds(id)
-                    .ok_or_else(|| format!("node {id} has no native bounds"))?;
-                (bounds.center(), Some(id))
+                self.agent.swipe_node(id, direction, explicit)?;
             }
-            None => (Point::new(Points(width / 2.0), Points(height / 2.0)), None),
-        };
-        // With no caller distance, the default spans 40% of the viewport but
-        // only as far as fits from the real start point, so the endpoint
-        // stays inside the surface.
-        let distance = explicit.unwrap_or_else(|| {
-            let base = (if horizontal { width } else { height }) * 0.4;
-            let room = match direction {
-                gpui_agent::SwipeDirection::Up => from.y.0,
-                gpui_agent::SwipeDirection::Down => height - from.y.0,
-                gpui_agent::SwipeDirection::Left => from.x.0,
-                gpui_agent::SwipeDirection::Right => width - from.x.0,
-            } - 1.0;
-            base.min(room.max(1.0))
-        });
-        let delta = match direction {
-            gpui_agent::SwipeDirection::Up => Point::new(Points(0.0), Points(-distance)),
-            gpui_agent::SwipeDirection::Down => Point::new(Points(0.0), Points(distance)),
-            gpui_agent::SwipeDirection::Left => Point::new(Points(-distance), Points(0.0)),
-            gpui_agent::SwipeDirection::Right => Point::new(Points(distance), Points(0.0)),
-        };
-        match node {
-            Some(id) => self.agent.drag_node_by(id, None, delta)?,
+            // The default distance is picked inside the agent, from the same
+            // checked origin and viewport the drag itself uses.
             None => {
-                self.agent.drag_at(
-                    from,
-                    Point::new(Points(from.x.0 + delta.x.0), Points(from.y.0 + delta.y.0)),
+                let viewport = self.agent.native_viewport();
+                let (width, height) = (viewport.width.0, viewport.height.0);
+                self.agent.swipe_at(
+                    Point::new(Points(width / 2.0), Points(height / 2.0)),
+                    direction,
+                    explicit,
                 )?;
             }
         }
@@ -1051,8 +1029,37 @@ fn serve_worker_stream(
         }
         let shutdown_op = matches!(req.op, Op::Shutdown);
         let confirmed_quit = gpui_agent::op_is_confirmed_quit(&req.op);
-        let resp = {
+        let timeout_ms = match &req.op {
+            Op::Wait {
+                timeout_ms: Some(timeout_ms),
+            } => Some(*timeout_ms),
+            Op::WaitUntil { timeout_ms, .. } => Some(*timeout_ms),
+            _ => None,
+        };
+        let resp = if let Some(timeout_ms) = timeout_ms {
+            // Timed waits poll the way gpui-agent's own `serve_host` does: one
+            // lock per check, released between polls, so another client can
+            // change the UI this one waits on. Shutdown stops a wait too.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+            loop {
+                if shutdown.load(Ordering::SeqCst) {
+                    return;
+                }
+                let step = {
+                    let host = host.lock().expect("host");
+                    worker_wait_step(&host, &mut cache, &req, Some(token), deadline)
+                };
+                if let Some(resp) = step {
+                    break resp;
+                }
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
+            }
+        } else {
             let mut host = host.lock().expect("host");
+            if shutdown.load(Ordering::SeqCst) {
+                return;
+            }
             gpui_agent::handle_request_cached(&mut *host, &mut cache, req, Some(token), nonce)
         };
         write_response(&mut writer, &mut encode_buf, &resp);
@@ -1060,6 +1067,59 @@ fn serve_worker_stream(
             shutdown.store(true, Ordering::SeqCst);
             return;
         }
+    }
+}
+
+/// One poll of a timed `Op::Wait`/`Op::WaitUntil`, matching gpui-agent
+/// 0.3.0's `dispatch::wait_step` (which is `pub(crate)` there): `None` while
+/// the wait can still be satisfied, `Some` once it resolves or times out.
+/// Called with the host lock held for exactly one check.
+#[cfg(feature = "dev-agent")]
+fn worker_wait_step(
+    host: &NshAgentHost,
+    cache: &mut gpui_agent::TreeCache,
+    req: &gpui_agent::Request,
+    token: Option<&str>,
+    deadline: std::time::Instant,
+) -> Option<gpui_agent::Response> {
+    match &req.op {
+        Op::Wait {
+            timeout_ms: Some(_),
+        } => {
+            let mut hello = host.hello();
+            if hello.ready {
+                hello.auth = gpui_agent::HelloAuth::from_token_configured(token);
+                gpui_agent::discovery::fill_hello_identity(&mut hello);
+                let mut response = gpui_agent::Response::ok(&req.id);
+                response.hello = Some(hello);
+                Some(response)
+            } else if std::time::Instant::now() >= deadline {
+                Some(gpui_agent::Response::err(&req.id, "wait timed out"))
+            } else {
+                None
+            }
+        }
+        Op::WaitUntil { spec, .. } => {
+            let tree = cache.snapshot(host);
+            match gpui_agent::assert_tree(&tree, spec) {
+                Ok(()) => Some(gpui_agent::Response::ok(&req.id)),
+                Err(error) => {
+                    if gpui_agent::is_in_viewport_unavailable(&error)
+                        && tree.platform == PlatformKind::Headless
+                    {
+                        return Some(gpui_agent::Response::err(&req.id, error));
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Some(gpui_agent::Response::err(
+                            &req.id,
+                            format!("wait_until timed out: {error}"),
+                        ));
+                    }
+                    None
+                }
+            }
+        }
+        _ => unreachable!("worker_wait_step requires a timed wait op"),
     }
 }
 
@@ -1715,5 +1775,47 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    #[cfg(feature = "dev-agent")]
+    #[test]
+    fn a_timed_wait_does_not_block_other_clients() {
+        let host = snapshot_host(SnapshotScene(Ok(sample_nodes()), 1, Default::default()));
+        let handle = spawn_worker("127.0.0.1:0".parse().unwrap(), "token".into(), host).unwrap();
+        let addr = handle.local_addr();
+
+        // One client waits on a node that never appears: it keeps polling
+        // until its 10 s deadline.
+        let mut waiting = gpui_agent::AgentClient::connect(addr).with_token("token");
+        let waiter = std::thread::spawn(move || {
+            waiting.call(&Op::WaitUntil {
+                timeout_ms: 10_000,
+                spec: gpui_agent::AssertSpec {
+                    target: "n9999".into(),
+                    ..Default::default()
+                },
+            })
+        });
+        // Give the wait time to reach its first poll.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // A second client must be served while the first still waits: holding
+        // the host lock for the whole wait would block this call for 10 s.
+        let mut second = gpui_agent::AgentClient::connect(addr).with_token("token");
+        let started = std::time::Instant::now();
+        let hello = second.call(&Op::Hello).expect("hello dispatches");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "second client blocked behind a timed wait"
+        );
+        assert!(hello.ok, "{hello:?}");
+
+        // Dropping the worker interrupts the still-running wait.
+        drop(handle);
+        let result = waiter.join().expect("waiter thread");
+        assert!(
+            result.is_err(),
+            "timed wait kept running after drop: {result:?}"
+        );
     }
 }

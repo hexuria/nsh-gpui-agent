@@ -2325,3 +2325,103 @@ fn press_at_refuses_a_hidden_view_that_takes_its_own_presses() {
     assert!(error.contains("accessibility-hidden"), "{error}");
     assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 0);
 }
+
+#[test]
+fn a_hold_reaches_a_long_press_only_child_inside_a_pressable_parent() {
+    use nsh_core::{EventMask, MountItem, ViewKind};
+
+    // The parent takes presses, the child only holds: the hold's hit check
+    // must resolve receivers by the long-press rules, not refuse the child
+    // as a press receiver mismatch.
+    let model = gate_scene(ViewKind::View, false, false);
+    let mut events = EventMask::default();
+    events.set(EventKind::LongPress, true);
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::View,
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Events { id: 3, events },
+            MountItem::Frame {
+                id: 3,
+                frame: Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+            },
+        ],
+    });
+    let frame = Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0)));
+    let bounds = [(2, frame), (3, frame)];
+    let center = point(px(50.0), px(50.0));
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(model, Ok(Some(3)), &bounds, &[], long_presses.clone());
+    let hold = Duration::from_millis(800);
+
+    agent.long_press_node(3, Some(hold)).unwrap();
+    agent.long_press_at(center, Some(hold)).unwrap();
+
+    assert_eq!(
+        *long_presses.lock().unwrap(),
+        vec![(center, hold), (center, hold)]
+    );
+}
+
+#[test]
+fn a_swipe_default_distance_stays_inside_when_clipping_moves_the_origin() {
+    use nsh_core::ViewKind;
+
+    // Clipping moves the drag origin to the visible sliver's middle: the
+    // default distance must fit from that origin, not the node's own
+    // center (which sits lower and would send the endpoint offscreen).
+    let model = gate_scene(ViewKind::View, false, true);
+    let bounds = [
+        (
+            1,
+            Bounds::new(point(px(0.0), px(45.0)), size(px(100.0), px(55.0))),
+        ),
+        (
+            2,
+            Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+        ),
+    ];
+    let agent = gate_agent(
+        model,
+        Ok(Some(2)),
+        &bounds,
+        size(px(100.0), px(100.0)),
+        Arc::default(),
+        Arc::default(),
+        Arc::default(),
+    );
+
+    agent.swipe_node(2, SwipeDirection::Down, None).unwrap();
+}
+
+#[test]
+fn fire_keybinding_dispatches_an_aliased_shared_chord_by_identity() {
+    // `control-s` and `ctrl+s` are the same chord: alias spellings must
+    // not hide the share and let the chord go out as keys.
+    let records = Arc::new(KeybindingRecords::default());
+    let agent = Agent::new(
+        keybinding_scene(vec![
+            keybinding("keymap.save", "control-s"),
+            keybinding("keymap.save_all", "ctrl+s"),
+        ]),
+        Box::new(KeybindingNative {
+            identity: true,
+            records: records.clone(),
+        }),
+    );
+
+    agent.fire_keybinding("keymap.save_all").unwrap();
+
+    assert_eq!(
+        *records.fired.lock().unwrap(),
+        vec!["keymap.save_all".to_string()]
+    );
+    assert!(records.sent.lock().unwrap().is_empty());
+}
