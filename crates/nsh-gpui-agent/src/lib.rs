@@ -366,16 +366,17 @@ impl NshAgentHost {
                 _ => vec!["press", "scroll", "hover", "drag", "viewport"],
             }
         };
-        if !self.tab_mode
-            && cfg!(target_os = "android")
-            && matches!(self.platform, PlatformKind::Mobile)
-        {
-            names.extend([
-                "paste",
-                "system.rotate",
-                "system.keyboard_show",
-                "system.keyboard_hide",
-            ]);
+        if !self.tab_mode && matches!(self.platform, PlatformKind::Mobile) {
+            if cfg!(target_os = "ios") {
+                names.push("paste");
+            } else if cfg!(target_os = "android") {
+                names.extend([
+                    "paste",
+                    "system.rotate",
+                    "system.keyboard_show",
+                    "system.keyboard_hide",
+                ]);
+            }
         }
         names.iter().map(|name| (*name).to_string()).collect()
     }
