@@ -240,6 +240,17 @@ impl StrictNative for MacStrictNative {
         })
         .unwrap_or(false)
     }
+
+    fn fire_keybinding(
+        &self,
+        binding: &nsh_agent_actions::SemanticKeybinding,
+    ) -> Result<(), String> {
+        let Some(id) = binding.keymap_id() else {
+            return Err(nsh_agent_actions::NATIVE_KEYBINDING_UNSUPPORTED.into());
+        };
+        self.on_main(move |surface, _| surface.key_command(id))
+            .ok_or_else(|| "the window is gone".to_owned())
+    }
 }
 
 impl Native for MacStrictNative {

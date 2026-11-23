@@ -25,24 +25,24 @@ jni = "0.21"
 # One NSH per build: every nsh-* crate comes from branch `gpui-agent` of the
 # fork, pinned to the tested commit (see README.md, "Which NSH to use"). An app that builds NSH from its
 # own checkout redirects these with `[patch."https://github.com/hexuria/nsh"]`.
-nsh-core = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342" }
-nsh-dev = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342" }
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", default-features = false }
-nsh-platform-ios = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", features = ["dev"] }
-nsh-ios-host = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342" }
-nsh-base = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342" }
+nsh-core = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54" }
+nsh-dev = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54" }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54", default-features = false }
+nsh-platform-ios = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54", features = ["dev"] }
+nsh-ios-host = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54" }
+nsh-base = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54" }
 ctrlc = { version = "3.5", features = ["termination"] }
 libc = "0.2"
-nsh-cli = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342" }
+nsh-cli = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54" }
 objc2 = "0.6.5"
 objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["std", "UIApplication", "UIResponder", "UIView", "UIWindow"] }
-nsh-platform-linux = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", features = ["dev"] }
-nsh-linux-host = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342" }
-nsh-platform-windows = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", features = ["dev"] }
-nsh-windows-host = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342" }
-nsh-platform-android = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", default-features = false }
-nsh-platform-macos = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", features = ["dev"] }
-nsh-macos-host = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342" }
+nsh-platform-linux = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54", features = ["dev"] }
+nsh-linux-host = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54" }
+nsh-platform-windows = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54", features = ["dev"] }
+nsh-windows-host = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54" }
+nsh-platform-android = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54", default-features = false }
+nsh-platform-macos = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54", features = ["dev"] }
+nsh-macos-host = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54" }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "std",
   "block2",

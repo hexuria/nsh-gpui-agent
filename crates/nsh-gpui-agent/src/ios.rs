@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use nsh_agent_actions::{Agent, StrictNative};
+use nsh_agent_actions::{Agent, NATIVE_KEYBINDING_UNSUPPORTED, SemanticKeybinding, StrictNative};
 use nsh_core::{
     NodeId,
     geometry::{Bounds, Point, Points, Size},
@@ -157,6 +157,17 @@ impl StrictNative for IosNative {
                 Ok(None)
             })
             .unwrap_or_else(|| Err("the window is gone".to_owned()))
+    }
+
+    fn fire_keybinding(&self, binding: &SemanticKeybinding) -> Result<(), String> {
+        let Some(id) = binding.keymap_id() else {
+            return Err(NATIVE_KEYBINDING_UNSUPPORTED.into());
+        };
+        self.surface
+            .with_views(move |_, _, mounted| mounted.key_command(id))
+            .unwrap_or(false)
+            .then_some(())
+            .ok_or_else(|| "the window is gone".to_owned())
     }
 }
 

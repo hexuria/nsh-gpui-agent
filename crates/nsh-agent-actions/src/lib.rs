@@ -173,6 +173,19 @@ pub struct SemanticKeybinding {
     pub menu_action_id: Option<u32>,
 }
 
+impl SemanticKeybinding {
+    /// The numeric keymap binding id the semantic id carries
+    /// (`keymap.<id>.<chord>`): `None` for a menu binding.
+    pub fn keymap_id(&self) -> Option<u32> {
+        self.id
+            .strip_prefix("keymap.")?
+            .split('.')
+            .next()?
+            .parse()
+            .ok()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct TargetGeometry {
     owner: NodeId,
@@ -1713,7 +1726,7 @@ impl Agent {
                                                 match hit_node {
                                                     None => break None,
                                                     Some(id) if by_id.contains_key(&id) => {
-                                                        break Some(id)
+                                                        break Some(id);
                                                     }
                                                     Some(id) => {
                                                         hit_node = nodes
@@ -1724,20 +1737,16 @@ impl Agent {
                                                             })
                                                             .map(|node| node.id)
                                                             .or_else(|| {
-                                                                parents
-                                                                    .get(&id)
-                                                                    .copied()
-                                                                    .flatten()
+                                                                parents.get(&id).copied().flatten()
                                                             });
                                                     }
                                                 }
                                             };
                                             semantic_hit.is_some_and(|hit_node| {
-                                                is_descendant_or_same(
-                                                    hit_node, target.id, &parents,
-                                                ) || is_descendant_or_same(
-                                                    target.id, hit_node, &parents,
-                                                )
+                                                is_descendant_or_same(hit_node, target.id, &parents)
+                                                    || is_descendant_or_same(
+                                                        target.id, hit_node, &parents,
+                                                    )
                                             })
                                         }
                                     }

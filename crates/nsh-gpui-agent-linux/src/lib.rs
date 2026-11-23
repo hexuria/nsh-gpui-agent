@@ -3,12 +3,12 @@
 #![cfg(target_os = "linux")]
 
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
 
-use nsh_agent_actions::{Agent, SemanticKeybinding, StrictNative};
+use nsh_agent_actions::{Agent, NATIVE_KEYBINDING_UNSUPPORTED, SemanticKeybinding, StrictNative};
 use nsh_core::{
     NodeId,
     desktop::{MenuItem, WindowState},
@@ -48,6 +48,7 @@ fn opened(opened: &OpenedSurface<'_>) -> Option<SurfaceAttachment> {
     let native = LinuxNative {
         native: surface.native(),
         surface,
+        window: Mutex::new(nsh_core::ROOT_ID),
         alive: alive.clone(),
     };
     let agent = Arc::new(Agent::requiring_native_hit_test(
@@ -79,6 +80,9 @@ fn opened(opened: &OpenedSurface<'_>) -> Option<SurfaceAttachment> {
 struct LinuxNative {
     native: Box<dyn Native>,
     surface: DevSurface,
+    /// The window input targets (`target_window`): hit tests and resizes
+    /// go to it too ([`nsh_core::ROOT_ID`]: the main window).
+    window: Mutex<NodeId>,
     alive: Arc<AtomicBool>,
 }
 
@@ -88,8 +92,15 @@ impl StrictNative for LinuxNative {
     }
 
     fn hit_at(&self, at: Point<Points>) -> Result<Option<NodeId>, String> {
+        let window = *self.window.lock().unwrap_or_else(|e| e.into_inner());
         self.surface
-            .on_main(move |surface| surface.node_at(at))
+            .on_main(move |surface| {
+                if window == nsh_core::ROOT_ID {
+                    surface.node_at(at)
+                } else {
+                    surface.window_node_at(window, at)
+                }
+            })
             .ok_or_else(|| "the window is gone".to_owned())
     }
 
@@ -127,9 +138,23 @@ impl StrictNative for LinuxNative {
 
     fn app_focused(&self) -> bool {
         self.surface
-            .on_main(|surface| surface.window().map(|window| window.is_active()))
-            .flatten()
+            .on_main(|surface| {
+                surface.window().is_some_and(|window| window.is_active())
+                    || surface
+                        .app_windows()
+                        .iter()
+                        .any(|id| surface.window_focused(*id) == Some(true))
+            })
             .unwrap_or(false)
+    }
+
+    fn fire_keybinding(&self, binding: &SemanticKeybinding) -> Result<(), String> {
+        let Some(id) = binding.keymap_id() else {
+            return Err(NATIVE_KEYBINDING_UNSUPPORTED.into());
+        };
+        self.surface
+            .on_main(move |surface| surface.key_command(id))
+            .ok_or_else(|| "the window is gone".to_owned())
     }
 
     fn fire_menu_keybinding(&self, binding: &SemanticKeybinding) -> Result<(), String> {
@@ -148,7 +173,11 @@ impl Native for LinuxNative {
         self.native.scroll_room(id, horizontal)
     }
     fn target_window(&self, window: NodeId) -> Result<(), String> {
-        self.native.target_window(window)
+        let result = self.native.target_window(window);
+        if result.is_ok() {
+            *self.window.lock().unwrap_or_else(|e| e.into_inner()) = window;
+        }
+        result
     }
     fn window_state(&self, window: NodeId) -> Result<Option<WindowState>, String> {
         self.native.window_state(window)
@@ -238,6 +267,15 @@ impl Native for LinuxNative {
         self.native.screenshot()
     }
     fn resize(&self, width: Points, height: Points) -> Result<(), String> {
+        let target = *self.window.lock().unwrap_or_else(|e| e.into_inner());
+        if target != nsh_core::ROOT_ID {
+            return self
+                .surface
+                .on_main(move |surface| surface.resize_window(target, width, height))
+                .unwrap_or(false)
+                .then_some(())
+                .ok_or_else(|| format!("window {target} is not mounted"));
+        }
         self.surface
             .on_main(move |surface| {
                 let window = surface
