@@ -28,7 +28,7 @@ and take screenshots, over a loopback connection the app opens only when it is t
 | Branch | `gpui-agent` |
 | What it is | An upstream release of `longbridge/nsh` plus a small set of doors, and nothing else |
 | Upstream release it sits on | `v0.6.1` (`2f51d8611`) |
-| Dependency pin (iOS Simulator tested) | [`ca714e1fb`](https://github.com/hexuria/nsh/commit/ca714e1fbfdda1ebd0cbd8b0fe3c04f1d307b6aa) |
+| Dependency pin (iOS Simulator tested) | [`68a4a99ec`](https://github.com/hexuria/nsh/commit/68a4a99ecef0f2ff57dab476ab64f86d46897600) |
 | Last Stage 0 headless test run | [`b609258a5`](https://github.com/hexuria/nsh/commit/b609258a57ff1e8eefae34a7733f69bfca5fda0c) |
 | The doors | `SOCKET.md` at the root of that branch lists every one |
 
@@ -40,7 +40,7 @@ The branch is rebased onto each new upstream release, so depend on a commit, not
 
 ```toml
 [dependencies]
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "ca714e1fbfdda1ebd0cbd8b0fe3c04f1d307b6aa", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "68a4a99ecef0f2ff57dab476ab64f86d46897600", default-features = false, features = ["agent"] }
 ```
 
 ## Using it from an app
@@ -126,20 +126,30 @@ connected development client and the host's existing error overlay. As in
 Verified operations: authenticated hello/wait, snapshot, click/press, type,
 Backspace, a Shift+A chord, set-value, scroll, drag, swipe, long-press dispatch,
 back navigation, and native
-PNG screenshots (including inline transfer). Long-press dispatch was accepted
-but did not change the semantic snapshot. Keybindings returned an empty catalog
-on this gallery page. Phones do not advertise hover or viewport resizing.
+PNG screenshots (including inline transfer). On the same iPhone 17 / iOS 26.5,
+the gallery's Gestures long-press handler adds the same press-event text as
+`buwiz`; both replies are `delivered_unverified`. The gallery home has no
+keybindings on either host; its Button page exposes `alt-cmd-f`, which toggles
+favorites on both. Before the first bundle mounts, a live coordinate press
+returns exactly `native surface is unavailable` on both. Phones do not
+advertise hover or viewport resizing.
+
+The observer receives the same `Model::engine_started` notification as on
+`buwiz`, so its mounted scene includes the whole page rather than only the
+rows made near the viewport. The initial gallery snapshot contains 713 nodes
+on both hosts. This notification completes the existing generic lifecycle
+door; no agent policy was added to the fork.
 
 **Stage 1 is not complete:** existing iOS native fixture tests have failures,
 including keyboard focus, large-title geometry and selection tracking. All
 eight failing cases also failed with a stock host from `089981575`, without the
-plug. An earlier `set-value` request appended instead of replacing text; the
-final pinned run correctly replaced it. That intermittent observation is
-recorded, not repaired as part of this move. The
-absent-mounter error path is compile-checked but was not forced through a live
-agent request. Plug tests, plug clippy (including the real Simulator target),
+plug. Ten consecutive `set-value` requests on existing input text replaced
+8 times and appended 2 times on `buwiz`, versus 9 replacements and 1 append
+on the plug. The shared intermittent behavior is recorded, not repaired as
+part of this move. Plug tests, plug clippy (including the real Simulator target),
 and the fork's prescribed iOS Catalyst clippy command passed. Detailed command
-output and screenshots from this machine are under `~/stage1-ios/`.
+output and screenshots from this machine are under `~/stage1-ios/`; the
+same-Simulator comparison is under `~/stage1-ios/parity/`.
 
 ## License
 
