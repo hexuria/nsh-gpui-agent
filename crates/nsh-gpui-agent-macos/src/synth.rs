@@ -34,11 +34,16 @@ pub(crate) fn mouse_event(
     clicks: isize,
     mods: NSEventModifierFlags,
 ) -> Option<Retained<NSEvent>> {
+    // The public constructor registers the event in upstream's placement
+    // memory. Make it once only for that entry, discard it, and reuse its
+    // exact timestamp in the stamped event that is actually dispatched.
+    let probe = nsh_platform_macos::synth::mouse_event(window, kind, x, y, clicks, mods)?;
+    let at = probe.timestamp();
     NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
         kind,
         nsh_platform_macos::synth::to_window(window, x, y),
         mods,
-        nsh_platform_macos::synth::timestamp(),
+        at,
         window.windowNumber(),
         None,
         crate::provenance::SYNTH_EVENT,
