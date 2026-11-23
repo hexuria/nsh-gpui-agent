@@ -5,7 +5,7 @@ Makes an app built with [Native Shell](https://github.com/longbridge/nsh) (NSH) 
 and take screenshots, over a loopback connection the app opens only when it is told to.
 
 > **Status: moving.** The adapter and the agent actions are here and their headless tests pass against the commit
-> below. No platform has been run from this repository yet: until the platforms table says otherwise, a platform does
+> below. Windows has been run from this repository; until the platforms table says otherwise, another platform does
 > not work from here. The plan is in
 > [`hexuria/nsh`, branch `feat/nsh-agent-socket`](https://github.com/hexuria/nsh/tree/feat/nsh-agent-socket/handover/agent-socket).
 
@@ -15,6 +15,7 @@ and take screenshots, over a loopback connection the app opens only when it is t
 |---|---|
 | `crates/nsh-agent-actions` | The strict agent actions: a semantic tree of the mounted views, and node and point actions (press, long press, type, scroll, keys, keybindings, screenshots) that prove their target with a native hit-test before acting. Hosts plug in through two traits, `SemanticScene` (implemented here for NSH's `nsh_testing::agent::Model`) and `StrictNative` (each platform implements it). |
 | `crates/nsh-gpui-agent` | The gpui-agent adapter: serves `gpui-agent`'s protocol over loopback and maps its requests onto `nsh-agent-actions`. |
+| `crates/nsh-gpui-agent-windows` | Attaches the adapter to Windows development surfaces and builds a development host with it installed. |
 
 ## Which NSH to use
 
@@ -26,7 +27,7 @@ and take screenshots, over a loopback connection the app opens only when it is t
 | Branch | `gpui-agent` |
 | What it is | An upstream release of `longbridge/nsh` plus a small set of doors, and nothing else |
 | Upstream release it sits on | `v0.6.1` (`2f51d8611`) |
-| Commit this repository is tested with | [`b609258a5`](https://github.com/hexuria/nsh/commit/b609258a57ff1e8eefae34a7733f69bfca5fda0c) |
+| Commit this repository is tested with | [`7b916cdb3`](https://github.com/hexuria/nsh/commit/7b916cdb37acbaca8778ccdaa36bde534efa7360) |
 | The doors | `SOCKET.md` at the root of that branch lists every one |
 
 A *door* is a small change that makes something in NSH public: an accessor, or a hook that calls out. A door holds
@@ -37,7 +38,7 @@ The branch is rebased onto each new upstream release, so depend on a commit, not
 
 ```toml
 [dependencies]
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "b609258a57ff1e8eefae34a7733f69bfca5fda0c", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "7b916cdb37acbaca8778ccdaa36bde534efa7360", default-features = false, features = ["agent"] }
 ```
 
 ## Using it from an app
@@ -70,10 +71,51 @@ Filled in from real runs on each platform's own machine. Headless tests on Linux
 |---|---|---|
 | macOS | not run yet | |
 | Linux | not run yet | |
-| Windows | not run yet | |
+| Windows | run; resize caveat below | Windows Server 2022, `hexuria/nsh` `7b916cdb3`, `gpui-agent-cli` 0.3.0 |
 | Android | not run yet | |
 | iOS | not run yet | |
 | Web | not run yet | |
+
+### Windows
+
+The gallery was run on a real Windows Server 2022 machine with this repository's development host. The ready
+handshake, semantic snapshots, clicking a demo, typing into search and an account field, a key chord (`ctrl+a`),
+a menu keybinding (opening the Quit confirmation), resizing, native PNG screenshots and a missing-target error
+were exercised. Typing returned `delivered_verified`; the key chord returned success without a tree-visible
+selection change (`delivered_unverified`). The menu confirmation and typed form were checked in a screenshot.
+
+Resizing requested **1000×700** but produced **1000×731**. The host delegates resize to NSH's existing native
+driver; `buwiz`'s client-area correction was not moved.
+
+Build the host from `crates/nsh-gpui-agent-windows` and place it in a runtime root. From this repository, in
+PowerShell:
+
+```powershell
+cargo build -p nsh-gpui-agent-windows --bin nsh-windows-host
+$runtime = "$HOME\nsh-runtime"
+New-Item -ItemType Directory -Force "$runtime\windows" | Out-Null
+Copy-Item target\debug\nsh-windows-host.exe "$runtime\windows\nsh-windows-host.exe"
+$env:NSH_RUNTIME = $runtime
+$env:GPUI_AGENT = "1"
+$env:GPUI_AGENT_ADDR = "127.0.0.1:17421"
+$env:GPUI_AGENT_TOKEN = [guid]::NewGuid().ToString("N")
+```
+
+Then, from the `hexuria/nsh` checkout at the commit above, in the same shell:
+
+```powershell
+nsh run examples/gallery --target windows
+```
+
+`NSH_RUNTIME` selects `<root>/windows/nsh-windows-host.exe` instead of NSH's ordinary development host. The
+gallery must have no `rust` host configuration, which takes precedence over `NSH_RUNTIME`. The adapter starts
+only with `GPUI_AGENT=1`, a loopback address and a nonempty token.
+
+Install the client with `cargo install gpui-agent-cli --version =0.3.0` (the `gpui-agent` package has no binary).
+Run it in another shell with the same `GPUI_AGENT_ADDR` and `GPUI_AGENT_TOKEN`. For a screenshot saved to an
+absolute local path, use `gpui-agent screenshot --inline --out <path.png>`; without `--inline`, the output name
+must be relative to the host's screenshot directory. Native screenshots worked in this run despite the CLI help's
+generic Windows limitation.
 
 ## License
 
