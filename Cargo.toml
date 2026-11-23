@@ -21,9 +21,12 @@ gpui-agent = "=0.3.0"
 # One NSH per build: every nsh-* crate comes from branch `gpui-agent` of the
 # fork, pinned to the tested commit (see README.md, "Which NSH to use"). An app that builds NSH from its
 # own checkout redirects these with `[patch."https://github.com/hexuria/nsh"]`.
-nsh-core = { git = "https://github.com/hexuria/nsh", rev = "b609258a57ff1e8eefae34a7733f69bfca5fda0c" }
-nsh-dev = { git = "https://github.com/hexuria/nsh", rev = "b609258a57ff1e8eefae34a7733f69bfca5fda0c" }
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "b609258a57ff1e8eefae34a7733f69bfca5fda0c", default-features = false }
+nsh-core = { git = "https://github.com/hexuria/nsh", rev = "7b916cdb37acbaca8778ccdaa36bde534efa7360" }
+nsh-dev = { git = "https://github.com/hexuria/nsh", rev = "7b916cdb37acbaca8778ccdaa36bde534efa7360" }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "7b916cdb37acbaca8778ccdaa36bde534efa7360", default-features = false }
+nsh-platform-windows = { git = "https://github.com/hexuria/nsh", rev = "7b916cdb37acbaca8778ccdaa36bde534efa7360", features = ["dev"] }
+nsh-windows-host = { git = "https://github.com/hexuria/nsh", rev = "7b916cdb37acbaca8778ccdaa36bde534efa7360" }
+nsh-base = { git = "https://github.com/hexuria/nsh", rev = "7b916cdb37acbaca8778ccdaa36bde534efa7360" }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
