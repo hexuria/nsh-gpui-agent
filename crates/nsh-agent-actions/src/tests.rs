@@ -1563,6 +1563,45 @@ fn button_label_press_rejects_siblings_and_accepts_only_its_ancestry() {
 }
 
 #[test]
+fn button_label_press_rejects_a_sibling_sharing_its_receiver() {
+    // Node 4 is not pressable itself: a hit on it (or its child 5)
+    // routes to node 2 — the same receiver the target's press takes.
+    // It still covers the label, so the press must not pass.
+    let label_bounds = Bounds::new(point(px(20.0), px(10.0)), size(px(40.0), px(20.0)));
+    for hit in [4, 5] {
+        let nodes = vec![
+            semantic_node(1, None, false, SemanticTarget::View),
+            semantic_node(2, Some(1), true, SemanticTarget::View),
+            semantic_node(6, Some(2), false, SemanticTarget::View),
+            semantic_node(3, Some(6), false, SemanticTarget::View),
+            semantic_node(4, Some(2), false, SemanticTarget::View),
+            semantic_node(5, Some(4), false, SemanticTarget::View),
+        ];
+        let agent = Agent::requiring_native_hit_test(
+            target_scene(nodes),
+            Box::new(GateNative {
+                windows: None,
+                bounds: [
+                    (2, Bounds::new(Point::default(), size(px(80.0), px(40.0)))),
+                    (3, label_bounds),
+                ]
+                .into(),
+                text_bounds: Default::default(),
+                hit: Ok(Some(hit)),
+                hits: Arc::new(Mutex::new(Vec::new())),
+                presses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                pressed_at: Arc::new(Mutex::new(Vec::new())),
+                long_presses: Arc::new(Mutex::new(Vec::new())),
+                typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                viewport: size(px(100.0), px(100.0)),
+            }),
+        );
+        let result = agent.press_node(3);
+        assert!(result.unwrap_err().contains(&format!("occluded_by: {hit}")));
+    }
+}
+
+#[test]
 fn a_hit_on_an_accessibility_hidden_child_is_a_hit_on_its_owner() {
     use nsh_core::{MountItem, ViewKind, ViewProps, geometry::Size};
 
