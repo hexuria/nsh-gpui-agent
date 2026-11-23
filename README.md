@@ -28,7 +28,7 @@ Upstream NSH on its own does not have the required doors.
 | Branch | `gpui-agent` |
 | What it is | An upstream release of `longbridge/nsh` plus a small set of doors, and nothing else |
 | Upstream release it sits on | `v0.6.1` (`2f51d8611`) |
-| Commit this repository is tested with | [`7d140d394`](https://github.com/hexuria/nsh/commit/7d140d39428f0e797bedd36357af807071e5d338) |
+| Commit this repository is tested with | [`7d140d394`](https://github.com/hexuria/nsh/commit/56add34a019022de6433dcf6fa62b345d33a3342) |
 | The doors | `SOCKET.md` at the root of that branch lists every one |
 
 A *door* is a small change that makes something in NSH public: an accessor, or a hook that calls out. A door holds
@@ -39,7 +39,7 @@ The branch is rebased onto each new upstream release, so depend on a commit, not
 
 ```toml
 [dependencies]
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "7d140d39428f0e797bedd36357af807071e5d338", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", default-features = false, features = ["agent"] }
 ```
 
 ## Using it from an app
