@@ -69,8 +69,31 @@ stage.
 ### Web development
 
 Build the workspace and install the matching client. A source-built wrapper needs a matching
-Web runtime, just as a distributed NSH CLI does. After a normal Web build/test in the pinned
-fork checkout, stage it from there:
+Web runtime, just as a distributed NSH CLI does.
+
+Before building that runtime, install the wasm target on **every OS**. Run from the pinned
+fork checkout: its `rust-toolchain.toml` selects the `stable` channel (not a fixed Rust version).
+
+```sh
+rustup target add --toolchain stable wasm32-unknown-unknown
+```
+
+The runtime's C dependencies also need a wasm32-capable clang and LLVM archiver. Linux needed
+clang/LLVM installed for our checks. On Windows, do not rely on the system C compiler: select
+a clang and `llvm-ar` that support wasm32 explicitly. For example, use the Android NDK's LLVM
+tools, or the official LLVM Windows release (`C:\Program Files\LLVM\bin`):
+
+```powershell
+# In the pinned fork checkout, using its stable toolchain:
+rustup target add --toolchain stable wasm32-unknown-unknown
+$llvmBin = "C:\path\to\android-ndk\toolchains\llvm\prebuilt\windows-x86_64\bin"
+# Alternatively: $llvmBin = "C:\Program Files\LLVM\bin"
+$env:CC_wasm32_unknown_unknown = Join-Path $llvmBin "clang.exe"
+$env:AR_wasm32_unknown_unknown = Join-Path $llvmBin "llvm-ar.exe"
+# Keep these variables set while running the Web build/test.
+```
+
+After a normal Web build/test in the pinned fork checkout, stage it from there:
 
 ```sh
 mkdir -p /path/to/runtime/web
