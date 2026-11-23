@@ -18,10 +18,12 @@ and take screenshots, over a loopback connection the app opens only when it is t
 | `crates/nsh-gpui-agent-ios-host` | A development host that registers the iOS surface hook before starting NSH, supplied through `NSH_RUNTIME`. |
 | `crates/nsh-gpui-agent-ios` | A Simulator launcher wrapping `nsh_cli::main()`, with a private one-use token handoff. |
 | `crates/nsh-agent-web` | An NSH CLI wrapper for owned-Chromium or user-opened Web tabs, with page-side hooks and synthetic tab input. |
+| `crates/nsh-gpui-agent-linux` | The Linux surface hook, strict native driver and opt-in `nsh-linux-host` development binary. |
 
 ## Which NSH to use
 
-**Use `https://github.com/hexuria/nsh`, branch `gpui-agent`.** Upstream NSH on its own does not work.
+**Use the pinned commit below from `https://github.com/hexuria/nsh`, branch `gpui-agent`.**
+Upstream NSH on its own does not have the required doors.
 
 | | |
 |---|---|
@@ -56,12 +58,44 @@ nsh-core    = { path = "../nsh/crates/nsh-core" }
 nsh-testing = { path = "../nsh/crates/nsh-testing" }
 nsh-dev     = { path = "../nsh/crates/nsh-dev" }
 nsh-platform-ios = { path = "../nsh/crates/nsh-platform-ios" } # when enabling ios
+nsh-platform-linux = { path = "../nsh/crates/nsh-platform-linux" }
+nsh-linux-host = { path = "../nsh/crates/nsh-linux-host" }
+nsh-base = { path = "../nsh/crates/nsh-base" }
 # Include this when linking the Web CLI wrapper:
 nsh-cli     = { path = "../nsh/crates/nsh-cli" }
 ```
 
 The app's NSH must contain everything branch `gpui-agent` has. Our own app line, `hexuria/nsh` branch `buwiz-next`,
 is that branch plus the app's other changes.
+
+## Linux development host
+
+Install the GTK/WebKitGTK prerequisites in NSH's `docs/dev/linux.md` (Ubuntu 24.04 or equivalent).
+Build this repository's host, not the one in the NSH checkout:
+
+```sh
+cargo build -p nsh-gpui-agent-linux --bin nsh-linux-host
+mkdir -p target/nsh-runtime/linux
+ln -sf "$PWD/target/debug/nsh-linux-host" "$PWD/target/nsh-runtime/linux/nsh-linux-host"
+export NSH_RUNTIME="$PWD/target/nsh-runtime"
+export GPUI_AGENT_TOKEN="$(openssl rand -hex 32)"
+export GPUI_AGENT_ADDR=127.0.0.1:17421
+GPUI_AGENT=1 xvfb-run -a env GDK_BACKEND=x11 GSK_RENDERER=cairo \
+  nsh run ../nsh/examples/gallery --target linux
+```
+
+Use the same address and token with `gpui-agent` in another terminal. An app with its own Rust host takes
+precedence over `NSH_RUNTIME`: link `nsh-gpui-agent-linux` into that host and call `install()` before opening
+surfaces. The hook retains its worker until the surface closes; without the opt-in environment no server starts.
+The ordinary NSH host, Linux native test driver and `nsh test` path are unchanged.
+
+The Linux move was exercised under Xvfb with the same buwiz gallery source and fresh app storage on both hosts:
+hello, snapshots, click, typing/Backspace (including native focus preservation), rejected F12, menu shortcut,
+press, hover, scroll, drag, viewport resize and PNG capture. The final pinned replay matched all 23 JSON files
+byte-for-byte; each PNG differed only in 20 pixels on the input caret's one-pixel-wide column. An earlier replay
+caught a different point in the initial navigation transition; its later snapshots matched. `invoke focus` is unsupported on both hosts; type/key exercise
+the native focus operation. Ordinary gallery tests also expose upstream native-only limitations (for example
+`audio()` is headless-only); the old `agent-*` fixtures use colon-containing selectors that upstream rejects.
 
 ## gpui-agent version
 
@@ -144,7 +178,7 @@ Filled in from real runs on each platform's own machine. Headless tests on Linux
 | Platform | Status | Tested on |
 |---|---|---|
 | macOS | not run yet | |
-| Linux | not run yet | |
+| Linux | Gallery action parity verified: 23/23 JSON files identical; PNG differences confined to the input caret. Build the plug's `nsh-linux-host` and select it with `NSH_RUNTIME` as above. | Ubuntu 24.04 container on Ubuntu 22.04 host, Xvfb; GTK 4.14.5 / WebKitGTK 2.52.6 |
 | Windows | not run yet | |
 | Android | not run yet | |
 | iOS | Simulator attachment live-verified; native regression failures remain | iPhone 17, iOS 26.5, Apple Silicon; pinned fork above |
