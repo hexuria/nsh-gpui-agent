@@ -1,5 +1,8 @@
 //! Adapter from the shared Native Shell test agent to the GPUI-agent protocol.
 
+#[cfg(all(target_os = "ios", feature = "ios"))]
+pub mod ios;
+
 #[cfg(feature = "dev-agent")]
 use std::sync::Mutex;
 use std::{
