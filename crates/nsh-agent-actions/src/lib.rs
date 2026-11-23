@@ -122,6 +122,9 @@ pub struct SemanticNode {
     pub scroll: bool,
     /// Whether this node handles press events.
     pub pressable: bool,
+    /// Whether this node observes raw touch events.
+    #[serde(default)]
+    pub touch: bool,
     /// The node's accessibility states.
     pub states: Vec<String>,
     /// The native view or precise native region represented by this node.
@@ -188,12 +191,16 @@ pub trait SemanticScene: Scene {
         let _ = id;
         Ok(false)
     }
-    /// The view a hold starting on `id` reaches through the platform's own
-    /// gesture recognizers: `id` or the nearest ancestor that hears long
-    /// presses or presses. A view that only observes raw touches is no
-    /// recognizer — the hold still reaches an ancestor's — so it does not
-    /// appear here. `Err` means the host cannot say: the agent falls back
-    /// to the model's long-press pick, which counts touch listeners.
+    /// The view that owns the native press starting on `id`: `id` or the
+    /// nearest ancestor the platform's press routing selects (`Press`,
+    /// `LongPress`, `PressDown` or `PressUp`). That owner is not always a
+    /// hold receiver: a view listening only for press-down/up takes the
+    /// press yet never fires a long-press, so the answer can name a
+    /// blocker rather than a handler. A view that only observes raw
+    /// touches is no recognizer — the hold still reaches an ancestor's —
+    /// so it does not appear here. `Err` means the host cannot say: the
+    /// agent falls back to the model's long-press pick, which counts
+    /// touch listeners.
     fn native_hold_receiver(&self, id: NodeId) -> Result<Option<NodeId>, String> {
         let _ = id;
         Err("the host does not report native hold receivers".into())
@@ -1223,11 +1230,18 @@ impl Agent {
             if let Ok(Pick::One(receiver)) = self.long_pressable(id)
                 && !receivers.contains(&receiver)
                 // The model pick counts raw touch listeners, which a
-                // touch-driven hold can use. But it may also land on an
-                // ancestor a press-taking child blocks natively (the pick
-                // steps over press-down/up listeners): it only counts when
-                // it sits at or below the native receiver.
-                && native.is_none_or(|native| is_descendant_or_same(receiver, native, parents))
+                // touch-driven hold can use: touches follow GPUI's raw
+                // touch path beside the press recognizers, so a
+                // press-down/up-only child does not block them. A picked
+                // ancestor without a touch listener can only hold through
+                // a recognizer the child blocks, so it counts just at or
+                // below the native receiver.
+                && (nodes
+                    .iter()
+                    .find(|node| node.id == receiver)
+                    .is_some_and(|node| node.touch)
+                    || native
+                        .is_none_or(|native| is_descendant_or_same(receiver, native, parents)))
             {
                 receivers.push(receiver);
             }
