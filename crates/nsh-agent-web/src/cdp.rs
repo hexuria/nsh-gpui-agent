@@ -62,13 +62,14 @@ pub(crate) fn find(given: Option<&Path>) -> anyhow::Result<PathBuf> {
 }
 
 /// The names Chrome, Edge and Chromium have on Linux and the BSDs.
-const LINUX_NAMES: [&str; 6] = [
+const LINUX_NAMES: [&str; 7] = [
     "google-chrome",
     "google-chrome-stable",
     "microsoft-edge",
     "microsoft-edge-stable",
     "chromium",
     "chromium-browser",
+    "chrome",
 ];
 
 /// Where Chrome, Edge and Chromium install, in that order.
@@ -438,6 +439,18 @@ fn indented(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(not(any(target_os = "macos", windows)))]
+    fn stock_chrome_is_the_last_path_candidate() {
+        assert_eq!(LINUX_NAMES.last(), Some(&"chrome"));
+        let dirs: Vec<_> = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .collect();
+        let paths = candidates();
+        let chrome: Vec<_> = dirs.iter().map(|dir| dir.join("chrome")).collect();
+        assert!(paths.ends_with(&chrome));
+        assert_eq!(paths.len(), dirs.len() * LINUX_NAMES.len());
+    }
 
     #[test]
     fn a_browser_given_must_exist() {
