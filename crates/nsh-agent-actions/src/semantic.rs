@@ -263,6 +263,7 @@ pub(crate) fn nodes(screen: &Screen) -> Vec<SemanticNode> {
             input: view.kind() == Some(ViewKind::Input),
             scroll: view.kind() == Some(ViewKind::Scroll) || view.scrolls(),
             pressable: view.events().contains(EventKind::Press),
+            long_press: view.events().contains(EventKind::LongPress),
             touch: view.events().contains(EventKind::Touch),
             states,
             native_target: if view.canvas_node() {

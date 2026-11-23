@@ -122,6 +122,9 @@ pub struct SemanticNode {
     pub scroll: bool,
     /// Whether this node handles press events.
     pub pressable: bool,
+    /// Whether this node handles long-press events.
+    #[serde(default)]
+    pub long_press: bool,
     /// Whether this node observes raw touch events.
     #[serde(default)]
     pub touch: bool,
@@ -1114,21 +1117,58 @@ impl Agent {
 
     /// The pressable span of text view `text` whose characters are at
     /// `at` (on their first line, as [`Native::text_bounds`] gives them).
+    /// Nested links can share the point: the innermost wins, as GPUI
+    /// delivers the press to it.
     fn pressable_span_at<'a>(
         &self,
         nodes: &'a [SemanticNode],
         text: NodeId,
         at: Point<Points>,
     ) -> Option<&'a SemanticNode> {
-        nodes.iter().find(|node| {
-            node.pressable
-                && matches!(node.native_target, SemanticTarget::Text { owner, start, end }
+        self.span_at(nodes, text, at, |node| node.pressable)
+    }
+
+    /// [`Agent::pressable_span_at`] matching spans that can take a hold —
+    /// a link listening only for long presses still owns the gesture.
+    fn holdable_span_at<'a>(
+        &self,
+        nodes: &'a [SemanticNode],
+        text: NodeId,
+        at: Point<Points>,
+    ) -> Option<&'a SemanticNode> {
+        self.span_at(nodes, text, at, |node| node.pressable || node.long_press)
+    }
+
+    /// The innermost span of text view `text` matching `hears` whose
+    /// characters are at `at`.
+    fn span_at<'a>(
+        &self,
+        nodes: &'a [SemanticNode],
+        text: NodeId,
+        at: Point<Points>,
+        hears: impl Fn(&SemanticNode) -> bool,
+    ) -> Option<&'a SemanticNode> {
+        let depth = |node: &SemanticNode| {
+            let mut depth = 0usize;
+            let mut parent = node.parent;
+            while let Some(id) = parent {
+                depth += 1;
+                parent = nodes.iter().find(|node| node.id == id).and_then(|node| node.parent);
+            }
+            depth
+        };
+        nodes
+            .iter()
+            .filter(|node| {
+                hears(node)
+                    && matches!(node.native_target, SemanticTarget::Text { owner, start, end }
                     if owner == text
                         && self
                             .native
                             .text_bounds(owner, start, end)
                             .is_some_and(|bounds| bounds.contains(&at)))
-        })
+            })
+            .max_by_key(|node| depth(node))
     }
 
     /// The view a press at `at` (which natively hit `hit`) goes to: the
@@ -1268,7 +1308,7 @@ impl Agent {
         text: NodeId,
         at: Point<Points>,
     ) -> Result<Option<(NodeId, NodeId)>, String> {
-        let Some(span) = self.pressable_span_at(nodes, text, at) else {
+        let Some(span) = self.holdable_span_at(nodes, text, at) else {
             return Ok(None);
         };
         if !span.enabled {
