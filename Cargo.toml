@@ -21,12 +21,12 @@ gpui-agent = "=0.3.0"
 # One NSH per build: every nsh-* crate comes from branch `gpui-agent` of the
 # fork, pinned to the tested commit (see README.md, "Which NSH to use"). An app that builds NSH from its
 # own checkout redirects these with `[patch."https://github.com/hexuria/nsh"]`.
-nsh-core = { git = "https://github.com/hexuria/nsh", rev = "542291b7a3870824432dd56d60db28c2709825d7" }
-nsh-dev = { git = "https://github.com/hexuria/nsh", rev = "542291b7a3870824432dd56d60db28c2709825d7" }
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "542291b7a3870824432dd56d60db28c2709825d7", default-features = false }
-nsh-platform-macos = { git = "https://github.com/hexuria/nsh", rev = "542291b7a3870824432dd56d60db28c2709825d7", features = ["dev"] }
-nsh-macos-host = { git = "https://github.com/hexuria/nsh", rev = "542291b7a3870824432dd56d60db28c2709825d7" }
-nsh-base = { git = "https://github.com/hexuria/nsh", rev = "542291b7a3870824432dd56d60db28c2709825d7" }
+nsh-core = { git = "https://github.com/hexuria/nsh", rev = "f96bcac4a80119d5bd347e0fb59b3041edc4f453" }
+nsh-dev = { git = "https://github.com/hexuria/nsh", rev = "f96bcac4a80119d5bd347e0fb59b3041edc4f453" }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "f96bcac4a80119d5bd347e0fb59b3041edc4f453", default-features = false }
+nsh-platform-macos = { git = "https://github.com/hexuria/nsh", rev = "f96bcac4a80119d5bd347e0fb59b3041edc4f453", features = ["dev"] }
+nsh-macos-host = { git = "https://github.com/hexuria/nsh", rev = "f96bcac4a80119d5bd347e0fb59b3041edc4f453" }
+nsh-base = { git = "https://github.com/hexuria/nsh", rev = "f96bcac4a80119d5bd347e0fb59b3041edc4f453" }
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "std",
