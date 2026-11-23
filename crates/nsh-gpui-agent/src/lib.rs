@@ -360,6 +360,15 @@ impl NshAgentHost {
                     "long_press",
                     "system.back",
                 ],
+                PlatformKind::Web => vec![
+                    "press",
+                    "scroll",
+                    "hover",
+                    "drag",
+                    "long_press",
+                    "paste",
+                    "viewport",
+                ],
                 _ => vec!["press", "scroll", "hover", "drag", "viewport"],
             }
         };
