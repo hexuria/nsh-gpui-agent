@@ -1,5 +1,8 @@
 //! Adapter from the shared Native Shell test agent to the GPUI-agent protocol.
 
+#[cfg(all(target_os = "ios", feature = "ios"))]
+pub mod ios;
+
 #[cfg(feature = "dev-agent")]
 use std::sync::Mutex;
 use std::{
@@ -361,16 +364,18 @@ impl NshAgentHost {
                 _ => vec!["press", "scroll", "hover", "drag", "viewport"],
             }
         };
-        if !self.tab_mode
-            && cfg!(target_os = "android")
-            && matches!(self.platform, PlatformKind::Mobile)
-        {
-            names.extend([
-                "paste",
-                "system.rotate",
-                "system.keyboard_show",
-                "system.keyboard_hide",
-            ]);
+        if !self.tab_mode && matches!(self.platform, PlatformKind::Mobile) {
+            // Every mobile driver supports paste; the OS gates below are
+            // about the driver's own platform — the iOS driver runs on the
+            // macOS host, so cfg!(ios) is never true here.
+            names.push("paste");
+            if cfg!(target_os = "android") {
+                names.extend([
+                    "system.rotate",
+                    "system.keyboard_show",
+                    "system.keyboard_hide",
+                ]);
+            }
         }
         names.iter().map(|name| (*name).to_string()).collect()
     }
