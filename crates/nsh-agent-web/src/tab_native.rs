@@ -10,6 +10,7 @@ use nsh_core::{
 };
 use nsh_dev::{DevServer, protocol::TestStep};
 use nsh_testing::agent::{Key, Native, drag_path};
+use serde_json::Value;
 
 use crate::synth::{SynthEvent, SynthKeyPhase, SynthPointerPhase};
 
@@ -36,6 +37,10 @@ impl TabNative {
     }
 
     fn send(&self, event: SynthEvent) -> Result<(), String> {
+        self.step(event).map(drop)
+    }
+
+    fn step(&self, event: SynthEvent) -> Result<Value, String> {
         self.server
             .step(
                 TestStep::Page {
@@ -44,7 +49,6 @@ impl TabNative {
                 },
                 ASK,
             )
-            .map(|_| ())
             .map_err(|error| {
                 if !self.server.has_tester() {
                     "no tab has opened the agent's page yet".into()
@@ -87,8 +91,8 @@ impl TabNative {
         key: String,
         code: String,
         modifiers: nsh_core::keymap::Modifiers,
-    ) -> Result<(), String> {
-        self.send(SynthEvent::Key {
+    ) -> Result<Value, String> {
+        self.step(SynthEvent::Key {
             phase,
             key,
             code,
@@ -182,13 +186,7 @@ impl Native for TabNative {
 
     fn press_keys(&self, keys: &str) -> Result<(), String> {
         let (stroke, (key, code)) = browser_keys(keys)?;
-        self.key_event(
-            SynthKeyPhase::Down,
-            key.clone(),
-            code.clone(),
-            stroke.modifiers,
-        )?;
-        self.key_event(SynthKeyPhase::Up, key, code, stroke.modifiers)
+        key_pair(|phase| self.key_event(phase, key.clone(), code.clone(), stroke.modifiers))
     }
 
     fn type_text(&self, text: &str) {
@@ -276,5 +274,71 @@ impl nsh_agent_actions::StrictNative for TabNative {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
+    }
+}
+
+fn key_pair(
+    mut dispatch: impl FnMut(SynthKeyPhase) -> Result<Value, String>,
+) -> Result<(), String> {
+    let down = dispatch(SynthKeyPhase::Down)?;
+    let up = dispatch(SynthKeyPhase::Up);
+    if let Some(error) = down.get("error").and_then(Value::as_str) {
+        return Err(error.to_owned());
+    }
+    up.map(drop)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn dispatched_keys_release_even_when_the_default_is_unsupported() {
+        for release in [Ok(Value::Null), Err("release failed".to_owned())] {
+            let mut phases = Vec::new();
+            let result = key_pair(|phase| {
+                phases.push(phase);
+                if phase == SynthKeyPhase::Down {
+                    Ok(json!({"dispatched": true, "error": "unsupported default"}))
+                } else {
+                    release.clone()
+                }
+            });
+            assert_eq!(result, Err("unsupported default".into()));
+            assert_eq!(phases, [SynthKeyPhase::Down, SynthKeyPhase::Up]);
+        }
+    }
+
+    #[test]
+    fn dispatch_failures_do_not_release_a_key_that_was_not_pressed() {
+        let mut phases = Vec::new();
+        assert_eq!(
+            key_pair(|phase| {
+                phases.push(phase);
+                Err("dispatch failed".into())
+            }),
+            Err("dispatch failed".into())
+        );
+        assert_eq!(phases, [SynthKeyPhase::Down]);
+    }
+
+    #[test]
+    fn supported_keys_report_the_release_result() {
+        for release in [Ok(Value::Null), Err("release failed".to_owned())] {
+            let mut phases = Vec::new();
+            assert_eq!(
+                key_pair(|phase| {
+                    phases.push(phase);
+                    if phase == SynthKeyPhase::Down {
+                        Ok(Value::Null)
+                    } else {
+                        release.clone()
+                    }
+                }),
+                release.map(drop)
+            );
+            assert_eq!(phases, [SynthKeyPhase::Down, SynthKeyPhase::Up]);
+        }
     }
 }

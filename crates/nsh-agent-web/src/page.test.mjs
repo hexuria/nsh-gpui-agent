@@ -11,7 +11,7 @@ function fakePlayer() {
   globalThis.location = { hash: "" };
   globalThis.sessionStorage = { getItem: () => null };
   vm.runInThisContext(source);
-  const player = { views: new Map(), synthesize(event) { return globalThis.nshPageSteps.synth(event, this); }, testPage(query) { return globalThis.nshPageSteps[query.query](query, this); } };
+  const player = { views: new Map(), synthesize(event) { const result = globalThis.nshPageSteps.synth(event, this); if (result?.error) throw new Error(result.error); return result; }, testPage(query) { return globalThis.nshPageSteps[query.query](query, this); } };
   return { player };
 }
 function view(id, extra = {}) { return { _id: id, isConnected: true, parentElement: null, ...extra }; }
@@ -38,7 +38,10 @@ test("caret and word defaults refuse an actual email input without selection off
       ];
       for (const [key, modifiers] of cases) {
         let error;
-        try { nshPageSteps.synth({ event: "key", phase: "down", key, ...modifiers }, player); }
+        try {
+          const result = nshPageSteps.synth({ event: "key", phase: "down", key, ...modifiers }, player);
+          if (result?.dispatched && result.error) throw new Error(result.error);
+        }
         catch (e) { error = e; }
         if (!error?.message.includes("cannot be synthesized")) throw new Error("silently accepted " + key);
       }

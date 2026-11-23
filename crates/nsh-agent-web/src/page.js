@@ -216,7 +216,7 @@ function synthesize(event) {
             && !["Control", "Alt", "Meta", "Shift"].includes(key))
         ));
       const unsupported = () => {
-        throw new Error(`key ${JSON.stringify(key)} cannot be synthesized; use type for text`);
+        throw Object.assign(new Error(`key ${JSON.stringify(key)} cannot be synthesized; use type for text`), { dispatched: true });
       };
       const keyEvent = new KeyboardEvent(event.phase === "down" ? "keydown" : "keyup", {
         key: event.key, code: event.code, shiftKey: event.shift, ctrlKey: event.ctrl,
@@ -460,5 +460,13 @@ const handlers = globalThis.nshPageSteps ??= Object.create(null);
 for (const name of ["hit_at", "focus", "focused", "app_focused", "input_text"]) {
 handlers[name] = (args, player) => question.call(player, { ...args, query: name });
 }
-handlers.synth = (event, player) => { synthesize.call(player, event); return null; };
+handlers.synth = (event, player) => {
+  try {
+    synthesize.call(player, event);
+    return null;
+  } catch (error) {
+    if (error.dispatched) return { dispatched: true, error: error.message };
+    throw error;
+  }
+};
 })();
