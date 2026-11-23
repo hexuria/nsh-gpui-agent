@@ -5,8 +5,8 @@ Makes an app built with [Native Shell](https://github.com/longbridge/nsh) (NSH) 
 and take screenshots, over a loopback connection the app opens only when it is told to.
 
 > **Status: moving.** The adapter and the agent actions are here and their headless tests pass against the commit
-> below. The iOS Simulator attachment runs from this repository, but its native regression suite is not all green.
-> See the platforms table for what has actually been checked. The plan is in
+> below. The iOS Simulator attachment and the Web tabs run from this repository; the iOS native
+> regression suite is not all green. See the platforms table for what has actually been checked. The plan is in
 > [`hexuria/nsh`, branch `feat/nsh-agent-socket`](https://github.com/hexuria/nsh/tree/feat/nsh-agent-socket/handover/agent-socket).
 
 ## What is here
@@ -17,6 +17,7 @@ and take screenshots, over a loopback connection the app opens only when it is t
 | `crates/nsh-gpui-agent` | The gpui-agent adapter: serves `gpui-agent`'s protocol over loopback and maps its requests onto `nsh-agent-actions`. |
 | `crates/nsh-gpui-agent-ios-host` | A development host that registers the iOS surface hook before starting NSH, supplied through `NSH_RUNTIME`. |
 | `crates/nsh-gpui-agent-ios` | A Simulator launcher wrapping `nsh_cli::main()`, with a private one-use token handoff. |
+| `crates/nsh-agent-web` | An NSH CLI wrapper for owned-Chromium or user-opened Web tabs, with page-side hooks and synthetic tab input. |
 
 ## Which NSH to use
 
@@ -55,6 +56,8 @@ nsh-core    = { path = "../nsh/crates/nsh-core" }
 nsh-testing = { path = "../nsh/crates/nsh-testing" }
 nsh-dev     = { path = "../nsh/crates/nsh-dev" }
 nsh-platform-ios = { path = "../nsh/crates/nsh-platform-ios" } # when enabling ios
+# Include this when linking the Web CLI wrapper:
+nsh-cli     = { path = "../nsh/crates/nsh-cli" }
 ```
 
 The app's NSH must contain everything branch `gpui-agent` has. Our own app line, `hexuria/nsh` branch `buwiz-next`,
@@ -67,6 +70,75 @@ stage.
 
 ## Platforms
 
+### Web development
+
+Build the workspace and install the matching client. A source-built wrapper needs a matching
+Web runtime, just as a distributed NSH CLI does.
+
+Before building that runtime, install the wasm target on **every OS**. Run from the pinned
+fork checkout: its `rust-toolchain.toml` selects the `stable` channel (not a fixed Rust version).
+
+```sh
+rustup target add --toolchain stable wasm32-unknown-unknown
+```
+
+The runtime's C dependencies also need a wasm32-capable clang and LLVM archiver. Linux needed
+clang/LLVM installed for our checks. On Windows, do not rely on the system C compiler: select
+a clang and `llvm-ar` that support wasm32 explicitly. For example, use the Android NDK's LLVM
+tools, or the official LLVM Windows release (`C:\Program Files\LLVM\bin`):
+
+```powershell
+# In the pinned fork checkout, using its stable toolchain:
+rustup target add --toolchain stable wasm32-unknown-unknown
+$llvmBin = "C:\path\to\android-ndk\toolchains\llvm\prebuilt\windows-x86_64\bin"
+# Alternatively: $llvmBin = "C:\Program Files\LLVM\bin"
+$env:CC_wasm32_unknown_unknown = Join-Path $llvmBin "clang.exe"
+$env:AR_wasm32_unknown_unknown = Join-Path $llvmBin "llvm-ar.exe"
+# Keep these variables set while running the Web build/test.
+```
+
+After a normal Web build/test in the pinned fork checkout, stage it from there:
+
+```sh
+mkdir -p /path/to/runtime/web
+cp -R crates/nsh-platform-web/web/. /path/to/runtime/web/
+cp target/wasm32-unknown-unknown/web/nsh-dev.wasm /path/to/runtime/web/
+cp target/wasm32-unknown-unknown/web/nsh-syntaxes.bin /path/to/runtime/web/
+export NSH_RUNTIME=/path/to/runtime
+```
+
+`NSH_RUNTIME` is the CLI's existing runtime-root override. Alternatively install the runtime
+beside the wrapper at `../runtime/web`. Then, from this repository:
+
+```sh
+cargo build --workspace
+cargo install gpui-agent-cli --version '=0.3.0' --locked
+export GPUI_AGENT_TOKEN="$(openssl rand -hex 32)" GPUI_AGENT_ADDR=127.0.0.1:17421
+# Run from an NSH checkout so examples/gallery is available.
+GPUI_AGENT=1 /path/to/nsh-gpui-agent/target/debug/nsh-agent-web run examples/gallery --target web
+# In another terminal with the same token and address:
+gpui-agent wait
+gpui-agent --reply-timeout-ms 90000 snapshot --pretty
+gpui-agent screenshot --out gallery.png
+```
+
+With `GPUI_AGENT` unset the wrapper runs the ordinary NSH CLI. Chromium is found on `PATH`
+(Chrome for Testing works); nothing downloads a browser. The default is an owned headless
+browser at 1280×800. `GPUI_AGENT_WEB_HEADED=1` shows it in a window.
+
+For a tab opened by hand, set `GPUI_AGENT_WEB_TAB=1` alongside `GPUI_AGENT=1` and open the
+printed pairing URL locally. Its fragment is removed and the key is kept in session storage
+for reloads. Only matching keys from loopback peers pair. Tab input is synthetic DOM input;
+paste, screenshots, viewport changes and browser controls unavailable in buwiz remain unavailable.
+Rust-root Web apps are not supported in agent mode. The token and address stay in the CLI
+environment and are not passed to Chromium. Page hooks mask secure input reads; the plug's
+semantic reader masks secure values from raw screen snapshots.
+
+Page tests: `node --test crates/nsh-agent-web/src/page.test.mjs`.
+
+The gallery's large initial tree exceeded the client's default 8-second reply timeout in the
+Linux run; the example gives it a longer timeout.
+
 Filled in from real runs on each platform's own machine. Headless tests on Linux do not count.
 
 | Platform | Status | Tested on |
@@ -76,7 +148,7 @@ Filled in from real runs on each platform's own machine. Headless tests on Linux
 | Windows | not run yet | |
 | Android | not run yet | |
 | iOS | Simulator attachment live-verified; native regression failures remain | iPhone 17, iOS 26.5, Apple Silicon; pinned fork above |
-| Web | not run yet | |
+| Web | owned Chromium and independently opened tab: hello, snapshot, click and type; owned screenshot | Linux, Chrome for Testing 156.0.8078.47, gpui-agent-cli 0.3.0 |
 
 ### iOS integration
 

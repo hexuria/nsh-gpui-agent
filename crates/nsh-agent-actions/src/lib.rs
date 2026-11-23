@@ -22,6 +22,7 @@ use nsh_testing::{
 };
 
 mod failure;
+mod screen_data;
 mod semantic;
 #[cfg(test)]
 mod tests;
