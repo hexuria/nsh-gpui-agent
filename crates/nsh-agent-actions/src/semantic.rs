@@ -20,6 +20,29 @@ impl SemanticScene for Model {
     fn long_press_disabled(&self, id: NodeId) -> Result<bool, String> {
         Ok(self.screen(|screen| long_press_disabled(screen, id)))
     }
+
+    fn native_hold_receiver(&self, id: NodeId) -> Result<Option<NodeId>, String> {
+        Ok(self.screen(|screen| native_hold_receiver(screen, id)))
+    }
+}
+
+/// [`SemanticScene::native_hold_receiver`] on `screen`.
+fn native_hold_receiver(screen: &Screen, id: NodeId) -> Option<NodeId> {
+    let mut at = Some(id);
+    while let Some(view_id) = at {
+        let view = screen.mounted(view_id)?;
+        let events = view.events();
+        // A raw touch observer installs no recognizer: a hold passes it to
+        // the nearest ancestor that hears long presses or presses. A
+        // disabled view's recognizer never fires either.
+        if !view.disabled()
+            && (events.contains(EventKind::LongPress) || events.contains(EventKind::Press))
+        {
+            return Some(view_id);
+        }
+        at = view.parent();
+    }
+    None
 }
 
 /// [`SemanticScene::long_press_disabled`] on `screen`.

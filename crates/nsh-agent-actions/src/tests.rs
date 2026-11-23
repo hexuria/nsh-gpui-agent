@@ -971,6 +971,141 @@ fn long_press_refuses_hidden_receivers_but_accepts_decorative_children() {
 }
 
 #[test]
+fn a_hold_through_a_touch_observer_still_reaches_the_parents_recognizer() {
+    use nsh_core::{EventMask, MountItem, ViewKind};
+
+    // A raw `Touch` listener installs no recognizer: a hold on the child
+    // still fires the parent's long-press recognizer.
+    let model = long_press_only_scene(false);
+    let mut touch = EventMask::default();
+    touch.set(EventKind::Touch, true);
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 3,
+                frame: Bounds::new(point(px(30.0), px(40.0)), size(px(20.0), px(20.0))),
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Events {
+                id: 3,
+                events: touch,
+            },
+        ],
+    });
+    let bounds = [(
+        2,
+        Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+    )];
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(model, Ok(Some(3)), &bounds, &[], long_presses.clone());
+    let center = point(px(50.0), px(50.0));
+
+    agent.long_press_node(2, None).unwrap();
+
+    assert_eq!(
+        *long_presses.lock().unwrap(),
+        vec![(center, Duration::from_millis(425))]
+    );
+}
+
+#[test]
+fn a_touch_observer_takes_a_hold_targeted_at_it() {
+    use nsh_core::{EventMask, MountItem, ViewKind};
+
+    // An app can hold from raw touches, so a hold aimed at the observer
+    // itself still goes through even under an ancestor's recognizer.
+    let model = long_press_only_scene(false);
+    let mut touch = EventMask::default();
+    touch.set(EventKind::Touch, true);
+    let child_bounds = Bounds::new(point(px(30.0), px(40.0)), size(px(20.0), px(20.0)));
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 3,
+                frame: child_bounds,
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Events {
+                id: 3,
+                events: touch,
+            },
+        ],
+    });
+    let bounds = [
+        (
+            2,
+            Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+        ),
+        (3, child_bounds),
+    ];
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(model, Ok(Some(3)), &bounds, &[], long_presses.clone());
+
+    agent.long_press_node(3, None).unwrap();
+
+    assert_eq!(
+        *long_presses.lock().unwrap(),
+        vec![(child_bounds.center(), Duration::from_millis(600))]
+    );
+}
+
+#[test]
+fn a_targeted_hold_refuses_a_nested_input_hit() {
+    use nsh_core::{InputConfig, MountItem, ViewKind};
+
+    // A hold on a field inside a long-pressable card goes to the field's
+    // text selection, not the card's recognizer.
+    let model = long_press_only_scene(false);
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::Input,
+            },
+            MountItem::Frame {
+                id: 3,
+                frame: Bounds::new(point(px(30.0), px(40.0)), size(px(20.0), px(20.0))),
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Input {
+                id: 3,
+                config: Box::new(InputConfig::default()),
+            },
+        ],
+    });
+    let bounds = [(
+        2,
+        Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0))),
+    )];
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(model, Ok(Some(3)), &bounds, &[], long_presses.clone());
+
+    let error = agent.long_press_node(2, None).unwrap_err();
+    assert!(error.contains("occluded_by"), "{error}");
+    assert!(long_presses.lock().unwrap().is_empty());
+}
+
+#[test]
 fn inputs_without_listeners_accept_node_and_point_long_presses() {
     use nsh_core::{EventMask, MountItem, ViewKind};
 

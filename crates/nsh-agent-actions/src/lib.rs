@@ -188,6 +188,16 @@ pub trait SemanticScene: Scene {
         let _ = id;
         Ok(false)
     }
+    /// The view a hold starting on `id` reaches through the platform's own
+    /// gesture recognizers: `id` or the nearest ancestor that hears long
+    /// presses or presses. A view that only observes raw touches is no
+    /// recognizer — the hold still reaches an ancestor's — so it does not
+    /// appear here. `Err` means the host cannot say: the agent falls back
+    /// to the model's long-press pick, which counts touch listeners.
+    fn native_hold_receiver(&self, id: NodeId) -> Result<Option<NodeId>, String> {
+        let _ = id;
+        Err("the host does not report native hold receivers".into())
+    }
 }
 
 /// What the agent needs of a platform beyond [`Native`]: proof of what is
@@ -1144,9 +1154,11 @@ impl Agent {
         None
     }
 
-    /// [`Agent::press_receiver`] for a hold: the receiver of the view that
-    /// would hear a long press starting at `at`.
-    fn hold_receiver(
+    /// [`Agent::press_receiver`] for a hold: every receiver a long press
+    /// starting at `at` can reach — the model's pick (it counts raw touch
+    /// listeners, an app may hold from touches) and the platform's
+    /// recognizer receiver (a touch observer does not own a hold).
+    fn hold_receivers(
         &self,
         nodes: &[SemanticNode],
         by_id: &std::collections::HashMap<NodeId, &SemanticNode>,
@@ -1154,47 +1166,61 @@ impl Agent {
         hidden_press_owners: &std::collections::HashMap<NodeId, NodeId>,
         hit: NodeId,
         at: Point<Points>,
-    ) -> Option<NodeId> {
+    ) -> Vec<NodeId> {
         if let Some(&receiver) = hidden_press_owners.get(&hit) {
-            return Some(receiver);
+            return vec![receiver];
         }
         if let Some(node) = by_id.get(&hit).copied() {
             if let Ok(Some((_, receiver))) = self.long_pressable_span_at(nodes, hit, at) {
-                return Some(receiver);
+                return vec![receiver];
             }
-            return self.hold_owner(nodes, node);
+            return self.hold_owners(nodes, node);
         }
         // A decorative hidden view: its hold goes where its semantic
         // owner's would.
         let mut current = parents.get(&hit).copied().flatten();
         while let Some(id) = current {
             if let Some(&receiver) = hidden_press_owners.get(&id) {
-                return Some(receiver);
+                return vec![receiver];
             }
             if let Some(node) = by_id.get(&id) {
-                return self.hold_owner(nodes, node);
+                return self.hold_owners(nodes, node);
             }
             current = parents.get(&id).copied().flatten();
         }
-        None
+        Vec::new()
     }
 
-    /// What a hold on `target` goes to: the receiver the platform picks
-    /// when the view is long-pressable, an enabled input itself (text
-    /// selection), else the nearest hold-capable ancestor.
-    fn hold_owner(&self, nodes: &[SemanticNode], target: &SemanticNode) -> Option<NodeId> {
+    /// What a hold on `target` can go to: an enabled input itself (native
+    /// text selection keeps the hold even under an ancestor's recognizer,
+    /// while a hold handler on the input names it the receiver either
+    /// way), else every receiver the gesture can reach — the model's
+    /// long-press pick and the native recognizer's. An empty list means
+    /// nothing takes the hold.
+    fn hold_owners(&self, nodes: &[SemanticNode], target: &SemanticNode) -> Vec<NodeId> {
         let mut current = Some(target.id);
         while let Some(id) = current {
-            let node = nodes.iter().find(|node| node.id == id)?;
-            if let Ok(Pick::One(receiver)) = self.long_pressable(id) {
-                return Some(receiver);
-            }
+            let Some(node) = nodes.iter().find(|node| node.id == id) else {
+                break;
+            };
             if node.input && node.enabled {
-                return Some(node.id);
+                return vec![node.id];
+            }
+            let mut receivers = Vec::new();
+            if let Ok(Some(receiver)) = self.scene.native_hold_receiver(id) {
+                receivers.push(receiver);
+            }
+            if let Ok(Pick::One(receiver)) = self.long_pressable(id)
+                && !receivers.contains(&receiver)
+            {
+                receivers.push(receiver);
+            }
+            if !receivers.is_empty() {
+                return receivers;
             }
             current = node.parent;
         }
-        None
+        Vec::new()
     }
 
     fn long_pressable_span_at(
@@ -1464,28 +1490,36 @@ impl Agent {
                             // long-press rules — an input or a long-press-only
                             // child inside a tappable parent takes the hold
                             // itself — not by the press rules.
-                            let receiver = if for_long_press {
-                                self.hold_receiver(
+                            if for_long_press {
+                                // A hold can reach several receivers: a
+                                // touch-observing child takes a touch-driven
+                                // hold while an ancestor's recognizer still
+                                // fires. Any of them may be the expected one.
+                                let receivers = self.hold_receivers(
                                     &nodes,
                                     &by_id,
                                     &parents,
                                     &hidden_press_owners,
                                     hit,
                                     at,
-                                )
+                                );
+                                if receivers.is_empty() {
+                                    is_descendant_or_same(hit, expected, &parents)
+                                } else {
+                                    receivers.contains(&expected)
+                                }
                             } else {
-                                self.press_receiver(
+                                match self.press_receiver(
                                     &nodes,
                                     &by_id,
                                     &parents,
                                     &hidden_press_owners,
                                     hit,
                                     at,
-                                )
-                            };
-                            match receiver {
-                                Some(receiver) => receiver == expected,
-                                None => is_descendant_or_same(hit, expected, &parents),
+                                ) {
+                                    Some(receiver) => receiver == expected,
+                                    None => is_descendant_or_same(hit, expected, &parents),
+                                }
                             }
                         }
                         None => is_descendant_or_same(hit, native_owner, &parents),
