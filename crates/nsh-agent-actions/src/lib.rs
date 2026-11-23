@@ -1036,9 +1036,20 @@ impl Agent {
                     .find(|node| node.hidden_descendants.contains(&id))
                     .ok_or("target_gone: coordinate has no semantic target")?;
                 let (gesture, owners) = match actionability {
-                    PointActionability::Press => ("press", &owner.hidden_press_owners),
-                    PointActionability::LongPress => ("hold", &owner.hidden_hold_owners),
-                    PointActionability::Any => ("press", &owner.hidden_press_owners),
+                    PointActionability::Press => ("press", owner.hidden_press_owners.clone()),
+                    // A hold's release is still a press: a hidden view
+                    // hearing either gesture intercepts the hold, its own
+                    // hold owner first when it listens for both.
+                    PointActionability::LongPress => (
+                        "hold",
+                        owner
+                            .hidden_hold_owners
+                            .iter()
+                            .chain(&owner.hidden_press_owners)
+                            .copied()
+                            .collect(),
+                    ),
+                    PointActionability::Any => ("press", owner.hidden_press_owners.clone()),
                 };
                 let receiver = owners
                     .iter()
@@ -1602,12 +1613,17 @@ impl Agent {
             .iter()
             .flat_map(|node| node.hidden_press_owners.iter().copied())
             .collect();
-        // A hold's hidden owners are its own set: a view listening only
-        // for long presses reserves the hold, not the tap.
-        let hidden_hold_owners: std::collections::HashMap<NodeId, NodeId> = nodes
-            .iter()
-            .flat_map(|node| node.hidden_hold_owners.iter().copied())
-            .collect();
+        // A hold's hidden owners are its own set — a view listening only
+        // for long presses reserves the hold, not the tap — but a hold's
+        // release still delivers a press, so a press-only hidden view
+        // intercepts the hold too. Hold receivers win ties: a view with
+        // both listeners resolves to its hold receiver.
+        let mut hidden_hold_owners = hidden_press_owners.clone();
+        hidden_hold_owners.extend(
+            nodes
+                .iter()
+                .flat_map(|node| node.hidden_hold_owners.iter().copied()),
+        );
         let deadline = Instant::now() + Duration::from_millis(100);
         loop {
             match self.native.hit_at(at) {
