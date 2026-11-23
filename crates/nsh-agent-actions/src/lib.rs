@@ -357,6 +357,10 @@ fn normalize_chord(chord: &str) -> Vec<String> {
                 "return" | "↵" | "⏎" => "enter".to_string(),
                 "del" => "delete".to_string(),
                 "spacebar" | "␣" => "space".to_string(),
+                // The menu catalogue's key labels spell these short.
+                "pageup" => "pgup".to_string(),
+                "pagedown" => "pgdn".to_string(),
+                "insert" => "ins".to_string(),
                 _ => part,
             }
         })
@@ -787,10 +791,9 @@ impl Agent {
     /// Drags from a checked native point to an on-screen point.
     pub fn drag_at(&self, from: Point<Points>, to: Point<Points>) -> Result<(), String> {
         let (_, from) = self.checked_point_target(from, PointActionability::Any)?;
-        self.drag_checked(
-            from,
-            Point::new(Points(to.x.0 - from.x.0), Points(to.y.0 - from.y.0)),
-        )
+        // The caller's absolute endpoint stays exact; a delta round-trip
+        // could round it onto the viewport edge and fail the check.
+        self.drag_checked(from, to)
     }
 
     /// Drags a checked node `id` `distance` points in `direction`: the
@@ -807,7 +810,7 @@ impl Agent {
         self.settled()?;
         let origin = self.node_point_without_reveal(id, &selector)?;
         let delta = self.swipe_delta(origin, direction, distance)?;
-        self.drag_checked(origin, delta)
+        self.drag_checked(origin, origin + delta)
     }
 
     /// [`Agent::swipe_node`] for a swipe starting at coordinate `from`.
@@ -819,7 +822,7 @@ impl Agent {
     ) -> Result<(), String> {
         let (_, origin) = self.checked_point_target(from, PointActionability::Any)?;
         let delta = self.swipe_delta(origin, direction, distance)?;
-        self.drag_checked(origin, delta)
+        self.drag_checked(origin, origin + delta)
     }
 
     /// The swipe's displacement: `distance` when given, else 40% of the
@@ -839,13 +842,18 @@ impl Agent {
             Some(_) => return Err("swipe distance must be finite and positive".into()),
             None => {
                 let base = (if horizontal { width } else { height }) * 0.4;
+                // One point shy of the edge: the endpoint must stay inside
+                // the surface even when `origin` nearly touches it.
                 let room = match direction {
                     SwipeDirection::Up => origin.y.0,
                     SwipeDirection::Down => height - origin.y.0,
                     SwipeDirection::Left => origin.x.0,
                     SwipeDirection::Right => width - origin.x.0,
                 } - 1.0;
-                base.min(room.max(1.0))
+                if room <= 0.0 {
+                    return Err("no room to swipe: the edge is already at hand".into());
+                }
+                base.min(room)
             }
         };
         Ok(match direction {
@@ -856,13 +864,9 @@ impl Agent {
         })
     }
 
-    /// Drags from `origin` by `delta`, refusing an offscreen or
+    /// Drags from `origin` to `to`, refusing an offscreen or
     /// untargetable destination.
-    fn drag_checked(&self, origin: Point<Points>, delta: Point<Points>) -> Result<(), String> {
-        let to = Point::new(
-            Points(origin.x.0 + delta.x.0),
-            Points(origin.y.0 + delta.y.0),
-        );
+    fn drag_checked(&self, origin: Point<Points>, to: Point<Points>) -> Result<(), String> {
         let viewport = self.native.viewport();
         if to.x.0 < 0.0 || to.y.0 < 0.0 || to.x.0 >= viewport.width.0 || to.y.0 >= viewport.height.0
         {
@@ -953,7 +957,7 @@ impl Agent {
                 self.node_point_without_reveal(id, &selector)?
             }
         };
-        self.drag_checked(origin, delta)
+        self.drag_checked(origin, origin + delta)
     }
 
     /// Resizes the native content viewport, rejecting invalid dimensions.

@@ -2560,3 +2560,53 @@ fn fire_keybinding_dispatches_an_aliased_shared_chord_by_identity() {
     );
     assert!(records.sent.lock().unwrap().is_empty());
 }
+
+#[test]
+fn fire_keybinding_dispatches_a_short_spelled_shared_chord_by_identity() {
+    // Menu labels spell these keys short: `ctrl-pageup` in the keymap and
+    // `ctrl+pgup` in the catalogue are one chord.
+    let records = Arc::new(KeybindingRecords::default());
+    let agent = Agent::new(
+        keybinding_scene(vec![
+            keybinding("keymap.prev_tab", "ctrl-pageup"),
+            keybinding("keymap.prev_doc", "ctrl+pgup"),
+        ]),
+        Box::new(KeybindingNative {
+            identity: true,
+            records: records.clone(),
+        }),
+    );
+
+    agent.fire_keybinding("keymap.prev_doc").unwrap();
+
+    assert_eq!(
+        *records.fired.lock().unwrap(),
+        vec!["keymap.prev_doc".to_string()]
+    );
+    assert!(records.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_swipe_without_room_to_the_edge_errors_instead_of_overshooting() {
+    // An origin a half point inside the left edge cannot host a default
+    // swipe: refuse rather than asking for a 1pt move past the edge.
+    let model = gate_scene(nsh_core::ViewKind::View, false, false);
+    let agent = gate_agent(
+        model,
+        Ok(Some(2)),
+        &[(
+            2,
+            Bounds::new(point(px(0.5), px(50.0)), size(px(1.0), px(1.0))),
+        )],
+        size(px(100.0), px(100.0)),
+        Arc::default(),
+        Arc::default(),
+        Arc::default(),
+    );
+
+    let error = agent
+        .swipe_at(point(px(0.5), px(50.5)), SwipeDirection::Left, None)
+        .unwrap_err();
+
+    assert!(error.contains("no room"), "{error}");
+}
