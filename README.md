@@ -16,7 +16,7 @@ and take screenshots, over a loopback connection the app opens only when it is t
 | `crates/nsh-agent-actions` | The strict agent actions: a semantic tree of the mounted views, and node and point actions (press, long press, type, scroll, keys, keybindings, screenshots) that prove their target with a native hit-test before acting. Hosts plug in through two traits, `SemanticScene` (implemented here for NSH's `nsh_testing::agent::Model`) and `StrictNative` (each platform implements it). |
 | `crates/nsh-gpui-agent` | The gpui-agent adapter: serves `gpui-agent`'s protocol over loopback and maps its requests onto `nsh-agent-actions`. |
 | `crates/nsh-gpui-agent-android` | Android: attaches to a development surface, loads its Java bridge from dex bytecode compiled while the crate builds, and implements `StrictNative` for the agent. |
-| `crates/nsh-gpui-agent-cli` | The `nsh-gpui-agent` command line: NSH's command line with the plug's Android launch hook, including the token handoff. |
+| `crates/nsh-gpui-agent-cli` | The `nsh-gpui-agent` command line: NSH's command line with the plug's shared development-host launch hook, including the Android token handoff. |
 
 ## Which NSH to use
 
@@ -28,7 +28,7 @@ and take screenshots, over a loopback connection the app opens only when it is t
 | Branch | `gpui-agent` |
 | What it is | An upstream release of `longbridge/nsh` plus a small set of doors, and nothing else |
 | Upstream release it sits on | `v0.6.1` (`2f51d8611`) |
-| Commit this repository is tested with | [`64f834fd5`](https://github.com/hexuria/nsh/commit/64f834fd558006ec672b0060a3e8a0d9d991fbf0) |
+| Commit this repository is tested with | [`6c24cda40`](https://github.com/hexuria/nsh/commit/6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094) |
 | The doors | `SOCKET.md` at the root of that branch lists every one |
 
 A *door* is a small change that makes something in NSH public: an accessor, or a hook that calls out. A door holds
@@ -39,7 +39,7 @@ The branch is rebased onto each new upstream release, so depend on a commit, not
 
 ```toml
 [dependencies]
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "64f834fd558006ec672b0060a3e8a0d9d991fbf0", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "6c24cda40d4e88dbf4e55a2b97a680ccc0bc4094", default-features = false, features = ["agent"] }
 ```
 
 ## Using it from an app

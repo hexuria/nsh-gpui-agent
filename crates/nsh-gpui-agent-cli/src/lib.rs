@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context as _, bail};
-use nsh_cli::{AndroidLaunch, set_android_launch_hook};
+use nsh_cli::{DevelopmentHostLaunch, set_development_host_launch_hook};
 
 /// The development host package every app shares in development.
 const BUNDLE_ID: &str = "com.longbridge.nsh.host";
@@ -17,13 +17,13 @@ const TOKEN_PATH: &str = "files/gpui-agent-token";
 
 /// Runs the command line after installing its hooks.
 pub fn main() -> ExitCode {
-    let _ = set_android_launch_hook(android_launch);
+    let _ = set_development_host_launch_hook(android_launch);
     nsh_cli::main()
 }
 
 /// Hands the agent token to the Android development host when its
 /// environment asks for one (`GPUI_AGENT=1` or `true`).
-fn android_launch(launch: &mut AndroidLaunch<'_>) -> anyhow::Result<Option<Box<dyn Any>>> {
+fn android_launch(launch: &mut DevelopmentHostLaunch<'_>) -> anyhow::Result<Option<Box<dyn Any>>> {
     if !matches!(std::env::var("GPUI_AGENT").as_deref(), Ok("1" | "true")) {
         return Ok(None);
     }
@@ -37,22 +37,50 @@ fn android_launch(launch: &mut AndroidLaunch<'_>) -> anyhow::Result<Option<Box<d
     if !socket.ip().is_loopback() {
         bail!("GPUI_AGENT_ADDR must be a loopback socket address");
     }
-    let write = shell_command(&[
-        "run-as",
-        BUNDLE_ID,
-        "sh",
-        "-c",
-        &format!("umask 077 && mkdir -p files && cat > {TOKEN_PATH}"),
-    ]);
     launch
-        .adb_with_input(&["shell", "-T", &write], &token)
+        .write_private_file(TOKEN_PATH, token.as_bytes())
         .context("store the GPUI-agent token in the development host")?;
-    launch.intent_extra("GPUI_AGENT", "1");
-    launch.intent_extra("GPUI_AGENT_ADDR", &address);
+    launch.set_environment("GPUI_AGENT", "1");
+    launch.set_environment("GPUI_AGENT_ADDR", &address);
     Ok(Some(Box::new(TokenCleanup {
-        adb: launch.adb_path(),
-        serial: launch.serial().to_owned(),
+        adb: adb_path()?,
+        serial: launch.device().to_owned(),
     })))
+}
+
+/// Finds adb for cleanup, which happens after the launch object is gone.
+fn adb_path() -> anyhow::Result<PathBuf> {
+    let root = ["ANDROID_HOME", "ANDROID_SDK_ROOT"]
+        .iter()
+        .find_map(std::env::var_os)
+        .map(PathBuf::from)
+        .or_else(|| {
+            if cfg!(windows) {
+                std::env::var_os("LOCALAPPDATA")
+                    .map(|dir| PathBuf::from(dir).join("Android/Sdk"))
+                    .filter(|path| path.exists())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join("Android/Sdk"))
+                .filter(|path| path.exists())
+        })
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join("Library/Android/sdk"))
+                .filter(|path| path.exists())
+        })
+        .context("Android SDK not found: set ANDROID_HOME")?;
+    let adb = root
+        .join("platform-tools")
+        .join(if cfg!(windows) { "adb.exe" } else { "adb" });
+    if !adb.is_file() {
+        bail!("adb not found at {}", adb.display());
+    }
+    Ok(adb)
 }
 
 /// Removes a token the host did not read (a launch that failed before its
