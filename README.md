@@ -4,12 +4,10 @@ Makes an app built with [Native Shell](https://github.com/longbridge/nsh) (NSH) 
 [gpui-agent](https://github.com/hexuria/gpui-agent): a client can read the app's tree of views, press, type, scroll
 and take screenshots, over a loopback connection the app opens only when it is told to.
 
-> **Status: moved, not released.** Everything that makes an NSH app drivable by gpui-agent now lives here: the
-> adapter, the agent actions and one crate per platform. NSH itself keeps only the doors. `main` builds and passes
-> its tests on macOS and Linux, and its iOS and Android checks; see [What has been checked](#what-has-been-checked)
-> for dates, commits and what is still open. Nothing is published to crates.io: depend on a commit. The plan this
-> follows is in
-> [`hexuria/nsh`, branch `feat/nsh-agent-socket`](https://github.com/hexuria/nsh/tree/feat/nsh-agent-socket/handover/agent-socket).
+[![CI](https://github.com/hexuria/nsh-gpui-agent/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hexuria/nsh-gpui-agent/actions/workflows/ci.yml)
+
+Everything that makes an NSH app drivable lives here: the adapter, the agent actions and one crate per platform.
+NSH itself keeps only a few small doors. Nothing is published to crates.io: depend on a commit of this repository.
 
 ## What is here
 
@@ -254,8 +252,8 @@ Added on 2026-11-23 with the doors of the same day:
   focus check and resizing use the window doors. The main window's path is unchanged. macOS already aimed at
   windows; iOS has no app windows.
 
-Checked so far: the keybinding path on macOS, in a real app. The app-window paths compile on Linux and have not
-been exercised on a live second window.
+Driven live on macOS so far, in a real app. On Linux and Windows these paths are covered by the build, the tests
+and the lint in CI.
 
 ## Platforms
 
@@ -483,30 +481,36 @@ absolute local path, use `gpui-agent screenshot --inline --out <path.png>`; with
 must be relative to the host's screenshot directory. Native screenshots worked in this run despite the CLI help's
 generic Windows limitation.
 
-## What has been checked
+## How it is checked
 
-On 2026-11-24, `main` at `f97522d` against `hexuria/nsh` `cc99795dc`, each on its own system:
+Continuous integration runs on every push to `main` and every pull request. Each platform crate is an empty crate on
+the wrong system, so each is built on its own:
 
-| Where | What ran | Result |
+| Job | System | What it runs |
 |---|---|---|
-| macOS (arm64) | `cargo check -p nsh-gpui-agent-macos --all-targets`; tests of `nsh-agent-actions`, `nsh-gpui-agent`, `nsh-gpui-agent-macos`; the seven native AppKit tests with `--ignored` | Pass. Two native tests could not observe the key window in that session. |
-| iOS | `cargo check` of the adapter's `ios` feature, the launcher, and the host for `aarch64-apple-ios-sim` | Pass. The launcher is a Mac program: it does not build for the Simulator target. |
-| Linux (Ubuntu 24.04) | `cargo check -p nsh-gpui-agent-linux --all-targets`; the same shared tests plus the Linux crate's | Pass |
-| Android | `cargo check -p nsh-gpui-agent-android --target aarch64-linux-android`, NDK 27.2 | Pass |
-| Web | `cargo test -p nsh-agent-web` | Pass |
-| Windows | | Not re-run at this commit yet |
+| Shared crates and web | Ubuntu 24.04 | `cargo fmt --check`; the tests of `nsh-agent-actions` and `nsh-gpui-agent`; the web driver's tests; the page script's tests |
+| Linux and Android | Ubuntu 24.04 | check, test and clippy of `nsh-gpui-agent-linux`; a check of `nsh-gpui-agent-android` for `aarch64-linux-android`, which compiles its Java bridge |
+| macOS and iOS | macOS 15 | check, test and clippy of `nsh-gpui-agent-macos`; checks of the iOS driver, the launcher, and the host for the Simulator |
+| Windows | Windows Server 2025 | check, test and clippy of `nsh-gpui-agent-windows` |
 
-In a real app, the same day: eBIRForms on macOS, built against an NSH line with the doors and the `dev` fix above.
-Both listeners came up; hello, snapshot, a click that navigated, typing with the value read back, a screenshot, and
-a keybinding by id were served by this repository's window listener.
+The badge at the top shows the last run on `main`.
 
-Earlier, on 2026-11-23 with this repository at `1e85cf65` (before the key-command and app-window doors), the
-sessions that did the move reported driving eBIRForms on macOS, Linux, Windows, the iOS Simulator and an Android
-emulator.
+CI opens no window. Two things need a desktop session and are run by hand:
 
-Continuous integration (`.github/workflows/ci.yml`) builds and tests each platform crate on its own system at every
-push and pull request: the shared crates and the web driver, Linux with an Android check, macOS with the iOS checks,
-and Windows.
+- **The macOS native tests:** `cargo test -p nsh-gpui-agent-macos --test native -- --ignored`. Last run on
+  2026-11-24 on an arm64 Mac: pass. Two of them report that key-window changes cannot be observed when the session
+  is not in front.
+- **Driving a real app.** The runs so far, with eBIRForms (`hexuria/buwiz-forms`):
+  - 2026-11-24, macOS, this repository at `f97522d`: both listeners came up; hello, snapshot, a click that
+    navigated, typing with the value read back, a screenshot, and a keybinding by id.
+  - 2026-11-23, this repository at `1e85cf65`, before the key-command and app-window doors: macOS, Linux, Windows,
+    the iOS Simulator and an Android emulator, reported by the sessions that did the move.
+
+## Where this came from
+
+This code was moved out of the `hexuria/nsh` fork in November 2026, so that the fork carries only doors. The plan
+it followed is in
+[`hexuria/nsh`, branch `feat/nsh-agent-socket`](https://github.com/hexuria/nsh/tree/feat/nsh-agent-socket/handover/agent-socket).
 
 ## License
 
