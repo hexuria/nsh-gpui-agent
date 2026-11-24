@@ -243,11 +243,18 @@ Added on 2026-11-23 with the doors of the same day:
   through each platform's key-command door (macOS, Linux, Windows, iOS), so a chord two bindings share is no
   longer ambiguous.
 - **A request aimed at one of the app's own windows stays in that window** on Linux and Windows: hit tests, the
-  focus check and resizing use the window doors. The main window's path is unchanged. macOS already aimed at
-  windows; iOS has no app windows.
+  focus check and resizing use the window doors. The main window's path is unchanged. iOS has no app windows.
 
-Driven live in a real app on macOS and Linux, on the main window. No live run has aimed at a second app window
-yet; on Linux and Windows that path is covered by the build, the tests and the lint in CI.
+What live runs in a real app have shown (eBIRForms, whose print preview is a second window):
+
+- **Linux:** the second window is its own root in the tree. A press inside it was verified and a resize reached
+  it, while the main window kept answering. A screenshot aimed at it still returns the main window.
+- **macOS:** a second window is not reachable when the app uses the in-process server (feature
+  `gpui-agent-server`, which eBIRForms does on macOS). One listener serves the first surface; the second window is
+  not in the tree and every request lands on the main window. That server also does not advertise `press` or
+  `scroll`: clients use `click`, `type` and `invoke`.
+- **Windows:** the app-window path is built, tested and linted, and has not been driven on a second window.
+- **A keybinding by id** has been fired on macOS and Windows.
 
 ## Platforms
 
@@ -507,7 +514,15 @@ CI opens no window. Two things need a desktop session and are run by hand:
     navigated, typing with the value read back, a screenshot, and a keybinding by id.
   - 2026-11-24, Linux under Xvfb, the same commit: hello, snapshot, a press that navigated, typing with the value
     read back, a viewport resize, a screenshot at the new size, and a key. The 0.3.0 and the 0.4.0 command lines
-    were each accepted by both listeners.
+    were each accepted by both listeners. A second run opened the print preview: see "Keybindings and app windows".
+  - 2026-11-24, Windows, the same commit, on two machines: both listeners came up (the window's for the first
+    time on Windows, once the build held one NSH); a press that navigated, typing with the value read back, a
+    screenshot, a key and a keybinding by id, and a viewport resize.
+  - 2026-11-24, iOS Simulator (iPhone 17), the same commit: a press that navigated, typing with the value read
+    back, an inline screenshot and a scroll.
+  - 2026-11-24, Android emulator (API 35), the same commit: a press that navigated, typing with the value read
+    back, set-value, a screenshot and a scroll. After the app is stopped and started again without its launcher,
+    neither listener comes back: the token hand-off is one-shot.
   - 2026-11-23, this repository at `1e85cf65`, before the key-command and app-window doors: macOS, Linux, Windows,
     the iOS Simulator and an Android emulator, reported by the sessions that did the move.
 
