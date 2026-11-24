@@ -252,8 +252,8 @@ Added on 2026-11-23 with the doors of the same day:
   focus check and resizing use the window doors. The main window's path is unchanged. macOS already aimed at
   windows; iOS has no app windows.
 
-Driven live on macOS so far, in a real app. On Linux and Windows these paths are covered by the build, the tests
-and the lint in CI.
+Driven live in a real app on macOS and Linux, on the main window. No live run has aimed at a second app window
+yet; on Linux and Windows that path is covered by the build, the tests and the lint in CI.
 
 ## Platforms
 
@@ -503,6 +503,9 @@ CI opens no window. Two things need a desktop session and are run by hand:
 - **Driving a real app.** The runs so far, with eBIRForms (`hexuria/buwiz-forms`):
   - 2026-11-24, macOS, this repository at `f97522d`: both listeners came up; hello, snapshot, a click that
     navigated, typing with the value read back, a screenshot, and a keybinding by id.
+  - 2026-11-24, Linux under Xvfb, the same commit: hello, snapshot, a press that navigated, typing with the value
+    read back, a viewport resize, a screenshot at the new size, and a key. The 0.3.0 and the 0.4.0 command lines
+    were each accepted by both listeners.
   - 2026-11-23, this repository at `1e85cf65`, before the key-command and app-window doors: macOS, Linux, Windows,
     the iOS Simulator and an Android emulator, reported by the sessions that did the move.
 
