@@ -937,11 +937,18 @@ fn serve_worker(
                     }
                     impl Drop for Guard {
                         fn drop(&mut self) {
-                            self.live.lock().expect("live streams").remove(&self.connection);
+                            self.live
+                                .lock()
+                                .expect("live streams")
+                                .remove(&self.connection);
                             self.inflight.fetch_sub(1, Ordering::SeqCst);
                         }
                     }
-                    let _guard = Guard { live, inflight, connection };
+                    let _guard = Guard {
+                        live,
+                        inflight,
+                        connection,
+                    };
                     serve_worker_stream(stream, host, &token, &shutdown, &limits);
                 });
             }
