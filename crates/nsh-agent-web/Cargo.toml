@@ -25,3 +25,6 @@ nsh-testing = { workspace = true, features = ["agent"] }
 serde.workspace = true
 serde_json.workspace = true
 tungstenite.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

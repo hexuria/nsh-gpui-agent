@@ -113,6 +113,10 @@ jobs:
         run: cargo test --locked -p nsh-gpui-agent-macos
       - name: Lint the macOS crate
         run: cargo clippy --locked -p nsh-gpui-agent-macos --all-targets -- -D warnings
+      # The web driver talks to its browser over pipes on Unix and over a port on Windows: each system compiles its
+      # own transport, so each builds the crate (its tests run on Linux).
+      - name: Check the web driver
+        run: cargo check --locked -p nsh-agent-web --all-targets
       # The iOS driver runs on the Mac (it is the adapter's `ios` feature); only the host is built for the Simulator.
       - name: Check the iOS driver, launcher and host
         run: |
@@ -139,6 +143,8 @@ jobs:
         run: cargo test --locked -p nsh-gpui-agent-windows
       - name: Lint the Windows crate
         run: cargo clippy --locked -p nsh-gpui-agent-windows --all-targets -- -D warnings
+      - name: Check the web driver
+        run: cargo check --locked -p nsh-agent-web --all-targets
 
   ci-ok:
     name: ci-ok

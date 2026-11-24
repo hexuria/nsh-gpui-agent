@@ -86,6 +86,75 @@ test("pairing consumes the fragment, survives reload and rejects malformed keys"
   assert.equal(load("").nshHelloExtra, undefined);
 });
 
+test("a refused page shows it and forgets the key; a paired page does not", () => {
+  const key = "cd".repeat(16);
+  class FakeSocket {
+    constructor(url) {
+      this.url = url;
+      this.listeners = [];
+    }
+    addEventListener(type, listener) {
+      if (type === "message") this.listeners.push(listener);
+    }
+    receive(data) {
+      for (const listener of this.listeners) listener({ data });
+    }
+  }
+  function load(stored) {
+    const appended = [];
+    const context = {
+      location: { hash: "", pathname: "/", search: "" },
+      history: { state: null, replaceState() {} },
+      sessionStorage: {
+        getItem: (k) => stored.get(k),
+        setItem: (k, v) => stored.set(k, v),
+        removeItem: (k) => stored.delete(k),
+      },
+      document: {
+        body: { append: (node) => appended.push(node) },
+        createElement: () => ({ style: {}, setAttribute(name, value) { this[name] = value; } }),
+      },
+      WebSocket: FakeSocket,
+    };
+    vm.runInNewContext(source, context);
+    return { context, appended };
+  }
+
+  // The paired tab, and a reload of it: hellos that pair change nothing.
+  const tab = new Map([["nsh-agent-key", key]]);
+  const paired = load(tab);
+  const socket = new paired.context.WebSocket("ws://127.0.0.1/ws");
+  assert.equal(socket.url, "ws://127.0.0.1/ws");
+  socket.receive(JSON.stringify({ type: "hello", observer: true, test: false }));
+  socket.receive(new ArrayBuffer(1));
+  socket.receive("not json");
+  assert.equal(paired.context.nshHelloExtra, key);
+  assert.equal(tab.get("nsh-agent-key"), key);
+  assert.deepEqual(paired.appended, []);
+
+  // A duplicate: same session storage, refused by the server.
+  const copy = new Map(tab);
+  const duplicate = load(copy);
+  const refused = new duplicate.context.WebSocket("ws://127.0.0.1/ws");
+  refused.receive(JSON.stringify({ type: "bundle", version: 1 }));
+  assert.equal(duplicate.context.nshHelloExtra, key);
+  refused.receive(JSON.stringify({ type: "hello", observer: false, test: false }));
+  assert.equal(duplicate.context.nshHelloExtra, undefined);
+  assert.equal(copy.has("nsh-agent-key"), false);
+  assert.equal(tab.get("nsh-agent-key"), key, "the paired tab keeps its key");
+  assert.equal(duplicate.appended.length, 1);
+  assert.equal(duplicate.appended[0].role, "alert");
+  assert.match(duplicate.appended[0].textContent, /another tab is already paired/);
+  // Its next connections present no key, and show the refusal once.
+  new duplicate.context.WebSocket("ws://127.0.0.1/ws")
+    .receive(JSON.stringify({ type: "hello", observer: false }));
+  assert.equal(duplicate.appended.length, 1);
+  assert.equal(load(copy).context.nshHelloExtra, undefined);
+
+  // A page without a key leaves the browser's WebSocket alone.
+  assert.equal(load(new Map()).context.WebSocket, FakeSocket);
+});
+
 test("page focus questions track the real field and app focus", () => {
   const saved = globalThis.document;
   const { player } = fakePlayer();

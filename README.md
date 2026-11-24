@@ -243,11 +243,18 @@ Added on 2026-11-23 with the doors of the same day:
   through each platform's key-command door (macOS, Linux, Windows, iOS), so a chord two bindings share is no
   longer ambiguous.
 - **A request aimed at one of the app's own windows stays in that window** on Linux and Windows: hit tests, the
-  focus check and resizing use the window doors. The main window's path is unchanged. macOS already aimed at
-  windows; iOS has no app windows.
+  focus check and resizing use the window doors. The main window's path is unchanged. iOS has no app windows.
 
-Driven live in a real app on macOS and Linux, on the main window. No live run has aimed at a second app window
-yet; on Linux and Windows that path is covered by the build, the tests and the lint in CI.
+What live runs in a real app have shown (eBIRForms, whose print preview is a second window):
+
+- **Linux:** the second window is its own root in the tree. A press inside it was verified and a resize reached
+  it, while the main window kept answering. A screenshot aimed at it still returns the main window.
+- **macOS:** a second window is not reachable when the app uses the in-process server (feature
+  `gpui-agent-server`, which eBIRForms does on macOS). One listener serves the first surface; the second window is
+  not in the tree and every request lands on the main window. That server also does not advertise `press` or
+  `scroll`: clients use `click`, `type` and `invoke`.
+- **Windows:** the app-window path is built, tested and linted, and has not been driven on a second window.
+- **A keybinding by id** has been fired on macOS and Windows.
 
 ## Platforms
 
@@ -305,11 +312,19 @@ gpui-agent screenshot --out gallery.png
 
 With `GPUI_AGENT` unset the wrapper runs the ordinary NSH CLI. Chromium is found on `PATH`
 (Chrome for Testing works); nothing downloads a browser. The default is an owned headless
-browser at 1280×800. `GPUI_AGENT_WEB_HEADED=1` shows it in a window.
+browser at 1280×800. `GPUI_AGENT_WEB_HEADED=1` shows it in a window. On Linux and macOS the
+tool talks to that browser over two inherited pipes (`--remote-debugging-pipe`), so the browser
+opens no DevTools port. On Windows it still uses a DevTools port on 127.0.0.1
+(`--remote-debugging-port=0`), and any local process can connect to that port while the browser
+runs. Standard Rust cannot limit which handles a child process inherits, so the pipes would also
+reach other processes started at the same time.
 
 For a tab opened by hand, set `GPUI_AGENT_WEB_TAB=1` alongside `GPUI_AGENT=1` and open the
 printed pairing URL locally. Its fragment is removed and the key is kept in session storage
-for reloads. Only matching keys from loopback peers pair. Tab input is synthetic DOM input;
+for reloads. Only matching keys from loopback peers pair, and one key pairs one tab. While the
+paired tab is connected, another tab with the key (a duplicate, which copies session storage)
+is refused: it shows a notice and forgets the key. A reload of the paired tab pairs again,
+because its old connection closes first. Tab input is synthetic DOM input;
 paste, screenshots, viewport changes and browser controls unavailable in buwiz remain unavailable.
 Rust-root Web apps are not supported in agent mode. The token and address stay in the CLI
 environment and are not passed to Chromium. Page hooks mask secure input reads; the plug's
@@ -499,7 +514,15 @@ CI opens no window. Two things need a desktop session and are run by hand:
     navigated, typing with the value read back, a screenshot, and a keybinding by id.
   - 2026-11-24, Linux under Xvfb, the same commit: hello, snapshot, a press that navigated, typing with the value
     read back, a viewport resize, a screenshot at the new size, and a key. The 0.3.0 and the 0.4.0 command lines
-    were each accepted by both listeners.
+    were each accepted by both listeners. A second run opened the print preview: see "Keybindings and app windows".
+  - 2026-11-24, Windows, the same commit, on two machines: both listeners came up (the window's for the first
+    time on Windows, once the build held one NSH); a press that navigated, typing with the value read back, a
+    screenshot, a key and a keybinding by id, and a viewport resize.
+  - 2026-11-24, iOS Simulator (iPhone 17), the same commit: a press that navigated, typing with the value read
+    back, an inline screenshot and a scroll.
+  - 2026-11-24, Android emulator (API 35), the same commit: a press that navigated, typing with the value read
+    back, set-value, a screenshot and a scroll. After the app is stopped and started again without its launcher,
+    neither listener comes back: the token hand-off is one-shot.
   - 2026-11-23, this repository at `1e85cf65`, before the key-command and app-window doors: macOS, Linux, Windows,
     the iOS Simulator and an Android emulator, reported by the sessions that did the move.
 
