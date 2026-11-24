@@ -1,0 +1,143 @@
+name: CI
+
+# Each platform crate is an empty crate on the wrong system, so it is built and tested on its own system.
+# The NSH these crates build against is the commit pinned in Cargo.toml (hexuria/nsh, branch gpui-agent).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # No debug info in CI's debug builds: faster builds and smaller caches.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  RUSTUP_TOOLCHAIN: "1.99.0"
+
+jobs:
+  shared:
+    name: Shared crates and web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Test the adapter and the agent actions
+        run: cargo test --locked -p nsh-agent-actions -p nsh-gpui-agent
+      - name: Test the web driver
+        run: cargo test --locked -p nsh-agent-web
+      - name: Test the web page script
+        run: node --test crates/nsh-agent-web/src/page.test.mjs
+
+  linux:
+    name: Linux and Android
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config perl python3 \
+            clang libclang-dev libgtk-4-dev libwebkitgtk-6.0-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libdbus-1-dev libssl-dev
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+          components: clippy
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check the Linux crate
+        run: cargo check --locked -p nsh-gpui-agent-linux --all-targets
+      - name: Test the Linux crate
+        run: cargo test --locked -p nsh-gpui-agent-linux
+      - name: Lint the Linux crate
+        run: cargo clippy --locked -p nsh-gpui-agent-linux --all-targets -- -D warnings
+      # The Android crate's build script compiles its Java bridge with javac and d8 (the runner's SDK and JDK), and
+      # the C dependencies need the NDK's compiler for the target.
+      - name: Check the Android crate
+        run: |
+          ndk="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$ndk/aarch64-linux-android26-clang"
+          export AR_aarch64_linux_android="$ndk/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+          cargo check --locked -p nsh-gpui-agent-android --target aarch64-linux-android
+
+  macos:
+    name: macOS and iOS
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+          components: clippy
+          targets: aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check the macOS crate
+        run: cargo check --locked -p nsh-gpui-agent-macos --all-targets
+      - name: Test the macOS crate
+        run: cargo test --locked -p nsh-gpui-agent-macos
+      - name: Lint the macOS crate
+        run: cargo clippy --locked -p nsh-gpui-agent-macos --all-targets -- -D warnings
+      # The iOS driver runs on the Mac (it is the adapter's `ios` feature); only the host is built for the Simulator.
+      - name: Check the iOS driver, launcher and host
+        run: |
+          cargo check --locked -p nsh-gpui-agent --features ios
+          cargo check --locked -p nsh-gpui-agent-ios
+          cargo check --locked -p nsh-gpui-agent-ios-host --target aarch64-apple-ios-sim
+
+  windows:
+    name: Windows
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check the Windows crate
+        run: cargo check --locked -p nsh-gpui-agent-windows --all-targets
+      - name: Test the Windows crate
+        run: cargo test --locked -p nsh-gpui-agent-windows
+      - name: Lint the Windows crate
+        run: cargo clippy --locked -p nsh-gpui-agent-windows --all-targets -- -D warnings
+
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [shared, linux, macos, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Every job passed
+        run: |
+          results='${{ toJSON(needs.*.result) }}'
+          echo "$results"
+          echo "$results" | grep -Eq 'failure|cancelled' && exit 1 || exit 0
