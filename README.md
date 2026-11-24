@@ -35,7 +35,7 @@ Upstream NSH on its own does not have the required doors.
 | Branch | `gpui-agent` |
 | What it is | An upstream release of `longbridge/nsh` plus a small set of doors, and nothing else |
 | Upstream release it sits on | `v0.6.1` (`2f51d8611`) |
-| Dependency pin | [`56add34a0`](https://github.com/hexuria/nsh/commit/56add34a019022de6433dcf6fa62b345d33a3342) |
+| Dependency pin | [`cc99795dc`](https://github.com/hexuria/nsh/commit/cc99795dc2fcb1bd0bb06b5953040273318f5f54) |
 | Last Stage 0 headless test run | [`56add34a0`](https://github.com/hexuria/nsh/commit/56add34a019022de6433dcf6fa62b345d33a3342) |
 | The doors | `SOCKET.md` at the root of that branch lists every one |
 
@@ -47,7 +47,7 @@ The branch is rebased onto each new upstream release, so depend on a commit, not
 
 ```toml
 [dependencies]
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54", default-features = false, features = ["agent"] }
 ```
 
 ## Using it from an app
@@ -62,7 +62,7 @@ checkout for both entries:
 [dependencies]
 # A relative path while testing this clone, or git + rev for a pinned commit.
 nsh-gpui-agent-android = { path = "../nsh-gpui-agent/crates/nsh-gpui-agent-android" }
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54", default-features = false, features = ["agent"] }
 ```
 
 Do not omit the direct `nsh-testing` dependency merely because the crate's Rust code does not name it: without a
