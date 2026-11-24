@@ -35,24 +35,18 @@ Upstream NSH on its own does not have the required doors.
 | Branch | `gpui-agent` |
 | What it is | An upstream release of `longbridge/nsh` plus a small set of doors, and nothing else |
 | Upstream release it sits on | `v0.6.1` (`2f51d8611`) |
-| Dependency pin (`Cargo.toml`, every `nsh-*` crate) | [`cc99795dc`](https://github.com/hexuria/nsh/commit/cc99795dc2fcb1bd0bb06b5953040273318f5f54) |
-| Last built and tested against | `cc99795dc`, on 2026-11-24 (macOS, Linux) |
+| Dependency pin (`Cargo.toml`, every `nsh-*` crate) | [`365864ba8`](https://github.com/hexuria/nsh/commit/365864ba8a3e56189f9a4fcdaf1c874313fc028e) |
 | The doors | `SOCKET.md` at the root of that branch lists every one |
 
 A *door* is a small change that makes something in NSH public: an accessor, or a hook that calls out. A door holds
 no logic. This repository needs a few of them, and upstream NSH does not have them yet, which is the only reason a
 fork is involved. If upstream takes the doors, this section changes to "use upstream NSH".
 
-**One fault at that commit.** `nsh-platform-macos` at `cc99795dc` compiles only with its `dev` feature: the four
-app-window accessors on `Surface` call helpers that exist only under `dev`. This workspace always enables `dev`, so
-it builds. An app that makes a build without `dev` (any release build) from an NSH carrying those doors needs the
-four accessors gated on `dev` too. The pin here moves to the fixed commit once the fix is on `gpui-agent`.
-
 The branch is rebased onto each new upstream release, so depend on a commit, not on the branch name:
 
 ```toml
 [dependencies]
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "365864ba8a3e56189f9a4fcdaf1c874313fc028e", default-features = false, features = ["agent"] }
 ```
 
 ## Using it from an app
@@ -67,7 +61,7 @@ checkout for both entries:
 [dependencies]
 # A relative path while testing this clone, or git + rev for a pinned commit.
 nsh-gpui-agent-android = { path = "../nsh-gpui-agent/crates/nsh-gpui-agent-android" }
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "365864ba8a3e56189f9a4fcdaf1c874313fc028e", default-features = false, features = ["agent"] }
 ```
 
 Do not omit the direct `nsh-testing` dependency merely because the crate's Rust code does not name it: without a
@@ -111,7 +105,7 @@ same `[patch."https://github.com/hexuria/nsh"]` block there after each build
 regenerates the manifest.
 
 The app's NSH must contain every door branch `gpui-agent` has at the pinned commit. Our own app line, `hexuria/nsh`
-branch `buwiz-next`, is that branch plus the app's other changes. It is built by replaying the doors, not by
+branch `buwiz-next`, is that branch plus the app's other changes (at `0cfc41294` it has every door of the pin above). It is built by replaying the doors, not by
 merging, so it is not a descendant of the pin: compare it with `SOCKET.md` each time the pin moves. A door the app's
 NSH lacks shows up as `no method named ...` in one of this repository's platform crates, compiled against the app's
 checkout.
