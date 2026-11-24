@@ -4,9 +4,11 @@ Makes an app built with [Native Shell](https://github.com/longbridge/nsh) (NSH) 
 [gpui-agent](https://github.com/hexuria/gpui-agent): a client can read the app's tree of views, press, type, scroll
 and take screenshots, over a loopback connection the app opens only when it is told to.
 
-> **Status: moving.** The adapter and the agent actions are here; macOS, iOS Simulator, Web tabs, Windows,
-> Linux and Android have all run live from this repository (the iOS native regression suite is not all green).
-> See the platforms table for what has actually been checked. The plan is in
+> **Status: moved, not released.** Everything that makes an NSH app drivable by gpui-agent now lives here: the
+> adapter, the agent actions and one crate per platform. NSH itself keeps only the doors. `main` builds and passes
+> its tests on macOS and Linux, and its iOS and Android checks; see [What has been checked](#what-has-been-checked)
+> for dates, commits and what is still open. Nothing is published to crates.io: depend on a commit. The plan this
+> follows is in
 > [`hexuria/nsh`, branch `feat/nsh-agent-socket`](https://github.com/hexuria/nsh/tree/feat/nsh-agent-socket/handover/agent-socket).
 
 ## What is here
@@ -35,19 +37,24 @@ Upstream NSH on its own does not have the required doors.
 | Branch | `gpui-agent` |
 | What it is | An upstream release of `longbridge/nsh` plus a small set of doors, and nothing else |
 | Upstream release it sits on | `v0.6.1` (`2f51d8611`) |
-| Dependency pin | [`56add34a0`](https://github.com/hexuria/nsh/commit/56add34a019022de6433dcf6fa62b345d33a3342) |
-| Last Stage 0 headless test run | [`56add34a0`](https://github.com/hexuria/nsh/commit/56add34a019022de6433dcf6fa62b345d33a3342) |
+| Dependency pin (`Cargo.toml`, every `nsh-*` crate) | [`cc99795dc`](https://github.com/hexuria/nsh/commit/cc99795dc2fcb1bd0bb06b5953040273318f5f54) |
+| Last built and tested against | `cc99795dc`, on 2026-11-24 (macOS, Linux) |
 | The doors | `SOCKET.md` at the root of that branch lists every one |
 
 A *door* is a small change that makes something in NSH public: an accessor, or a hook that calls out. A door holds
 no logic. This repository needs a few of them, and upstream NSH does not have them yet, which is the only reason a
 fork is involved. If upstream takes the doors, this section changes to "use upstream NSH".
 
+**One fault at that commit.** `nsh-platform-macos` at `cc99795dc` compiles only with its `dev` feature: the four
+app-window accessors on `Surface` call helpers that exist only under `dev`. This workspace always enables `dev`, so
+it builds. An app that makes a build without `dev` (any release build) from an NSH carrying those doors needs the
+four accessors gated on `dev` too. The pin here moves to the fixed commit once the fix is on `gpui-agent`.
+
 The branch is rebased onto each new upstream release, so depend on a commit, not on the branch name:
 
 ```toml
 [dependencies]
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54", default-features = false, features = ["agent"] }
 ```
 
 ## Using it from an app
@@ -62,7 +69,7 @@ checkout for both entries:
 [dependencies]
 # A relative path while testing this clone, or git + rev for a pinned commit.
 nsh-gpui-agent-android = { path = "../nsh-gpui-agent/crates/nsh-gpui-agent-android" }
-nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "56add34a019022de6433dcf6fa62b345d33a3342", default-features = false, features = ["agent"] }
+nsh-testing = { git = "https://github.com/hexuria/nsh", rev = "cc99795dc2fcb1bd0bb06b5953040273318f5f54", default-features = false, features = ["agent"] }
 ```
 
 Do not omit the direct `nsh-testing` dependency merely because the crate's Rust code does not name it: without a
@@ -105,8 +112,31 @@ are separate workspaces, so the app's own patch does not reach them. Add the
 same `[patch."https://github.com/hexuria/nsh"]` block there after each build
 regenerates the manifest.
 
-The app's NSH must contain everything branch `gpui-agent` has. Our own app line, `hexuria/nsh` branch `buwiz-next`,
-is that branch plus the app's other changes.
+The app's NSH must contain every door branch `gpui-agent` has at the pinned commit. Our own app line, `hexuria/nsh`
+branch `buwiz-next`, is that branch plus the app's other changes. It is built by replaying the doors, not by
+merging, so it is not a descendant of the pin: compare it with `SOCKET.md` each time the pin moves. A door the app's
+NSH lacks shows up as `no method named ...` in one of this repository's platform crates, compiled against the app's
+checkout.
+
+## An app with its own Rust host
+
+`NSH_RUNTIME` (the sections below) is for apps that use NSH's stock development host. An app that has its own Rust
+host links the plug into it instead. This is how eBIRForms (`hexuria/buwiz-forms`, directory `nsh/`) does it:
+
+- **One dependency per platform, all at the same commit of this repository.** Each goes under its
+  `[target.'cfg(target_os = "...")'.dependencies]`, optional, behind one feature of the app. Different commits
+  would link the shared crates (`nsh-gpui-agent`, `nsh-agent-actions`) twice.
+- **Install before the first surface opens.** Call `nsh_gpui_agent_macos::install()`,
+  `nsh_gpui_agent_linux::install()`, `nsh_gpui_agent_windows::install()` or `nsh_gpui_agent::ios::install()` at the
+  top of the host's entry point. Linking alone does nothing. Android is the exception: `nsh-gpui-agent-android`
+  installs itself when the library loads.
+- **The `[patch]` above, in the generated workspace too.** NSH rewrites `nsh/.nsh/rust/Cargo.toml` on every build,
+  so the app re-adds the block each time. eBIRForms does it from the script it sets as `CARGO` for agent builds.
+- **A port of its own for any second listener.** The plug serves the window (tree, press, type, screenshot) on
+  `GPUI_AGENT_ADDR`. An app that also serves a gpui-agent session of its own must put it elsewhere; eBIRForms uses
+  the next port.
+
+Nothing starts without `GPUI_AGENT=1`, a loopback `GPUI_AGENT_ADDR` and a token.
 
 ## Linux development host
 
@@ -206,8 +236,26 @@ a build. Input provenance, settle behavior, file drops, surface ownership and wi
 
 ## gpui-agent version
 
-`gpui-agent` `=0.3.0` during the move, so behavior can be compared like for like. Moving to 0.4.0 is the plan's last
-stage.
+This repository speaks `gpui-agent` `=0.3.0`, the version it was moved with, so behavior could be compared like for
+like. Moving to 0.4.0 is the next step and is not done.
+
+An app may link another gpui-agent version for a listener of its own. eBIRForms links 0.4.0 for its data listener
+beside this repository's 0.3.0 window listener, and cargo builds both. Both answered `protocol: 2` in the run of
+2026-11-24. Until the move, use the 0.3.0 command line with the window listener, as the platform sections say.
+
+## Keybindings and app windows
+
+Added on 2026-11-23 with the doors of the same day:
+
+- **A keybinding runs by its id.** `keybinding` fires the exact binding its id names (`keymap.<n>.<chord>`)
+  through each platform's key-command door (macOS, Linux, Windows, iOS), so a chord two bindings share is no
+  longer ambiguous.
+- **A request aimed at one of the app's own windows stays in that window** on Linux and Windows: hit tests, the
+  focus check and resizing use the window doors. The main window's path is unchanged. macOS already aimed at
+  windows; iOS has no app windows.
+
+Checked so far: the keybinding path on macOS, in a real app. The app-window paths compile on Linux and have not
+been exercised on a live second window.
 
 ## Platforms
 
@@ -434,6 +482,32 @@ Run it in another shell with the same `GPUI_AGENT_ADDR` and `GPUI_AGENT_TOKEN`. 
 absolute local path, use `gpui-agent screenshot --inline --out <path.png>`; without `--inline`, the output name
 must be relative to the host's screenshot directory. Native screenshots worked in this run despite the CLI help's
 generic Windows limitation.
+
+## What has been checked
+
+On 2026-11-24, `main` at `f97522d` against `hexuria/nsh` `cc99795dc`, each on its own system:
+
+| Where | What ran | Result |
+|---|---|---|
+| macOS (arm64) | `cargo check -p nsh-gpui-agent-macos --all-targets`; tests of `nsh-agent-actions`, `nsh-gpui-agent`, `nsh-gpui-agent-macos`; the seven native AppKit tests with `--ignored` | Pass. Two native tests could not observe the key window in that session. |
+| iOS | `cargo check` of the adapter's `ios` feature, the launcher, and the host for `aarch64-apple-ios-sim` | Pass. The launcher is a Mac program: it does not build for the Simulator target. |
+| Linux (Ubuntu 24.04) | `cargo check -p nsh-gpui-agent-linux --all-targets`; the same shared tests plus the Linux crate's | Pass |
+| Android | `cargo check -p nsh-gpui-agent-android --target aarch64-linux-android`, NDK 27.2 | Pass |
+| Web | `cargo test -p nsh-agent-web` | Pass |
+| Windows | | Not re-run at this commit yet |
+
+In a real app, the same day: eBIRForms on macOS, built against an NSH line with the doors and the `dev` fix above.
+Both listeners came up; hello, snapshot, a click that navigated, typing with the value read back, a screenshot, and
+a keybinding by id were served by this repository's window listener.
+
+Earlier, on 2026-11-23 with this repository at `1e85cf65` (before the key-command and app-window doors), the
+sessions that did the move reported driving eBIRForms on macOS, Linux, Windows, the iOS Simulator and an Android
+emulator.
+
+Continuous integration (`.github/workflows/ci.yml`) builds and tests each platform crate on its own system at every
+push and pull request: the shared crates and the web driver, Linux with an Android check, macOS with the iOS checks,
+and Windows.
+
 ## License
 
 Apache-2.0, as NSH and gpui-agent are.
