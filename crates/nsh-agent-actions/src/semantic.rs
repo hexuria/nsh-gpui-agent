@@ -247,14 +247,8 @@ pub(crate) fn nodes(screen: &impl ScreenData) -> Vec<SemanticNode> {
     // The last element: in a hidden subtree, the innermost hidden view
     // above that takes presses.
     let mut stack = vec![(ROOT, None, false, false, None, None)];
-    while let Some((
-        id,
-        parent,
-        inherited_hidden,
-        inherited_disabled,
-        hidden_press,
-        hidden_hold,
-    )) = stack.pop()
+    while let Some((id, parent, inherited_hidden, inherited_disabled, hidden_press, hidden_hold)) =
+        stack.pop()
     {
         let Some(view) = screen.mounted(id) else {
             continue;
@@ -300,7 +294,9 @@ pub(crate) fn nodes(screen: &impl ScreenData) -> Vec<SemanticNode> {
                     owner.hidden_hold_owners.push((id, receiver));
                 }
                 if let Some(span) = view.span() {
-                    owner.hidden_text_spans.push((id, span.view, span.start, span.end));
+                    owner
+                        .hidden_text_spans
+                        .push((id, span.view, span.start, span.end));
                 }
             }
             stack.extend(
