@@ -18,7 +18,7 @@ private_interfaces = "deny"
 [workspace.dependencies]
 nsh-agent-actions = { path = "crates/nsh-agent-actions" }
 nsh-gpui-agent = { path = "crates/nsh-gpui-agent" }
-gpui-agent = "=0.3.0"
+gpui-agent = "=0.4.0"
 anyhow = "1"
 ctor = "1"
 jni = "0.21"
