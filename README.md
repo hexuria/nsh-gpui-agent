@@ -228,12 +228,12 @@ a build. Input provenance, settle behavior, file drops, surface ownership and wi
 
 ## gpui-agent version
 
-This repository speaks `gpui-agent` `=0.3.0`, the version it was moved with, so behavior could be compared like for
-like. Moving to 0.4.0 is the next step and is not done.
+This repository speaks `gpui-agent` `=0.4.0`. It was moved out of the fork at `=0.3.0`, so behavior could be compared
+like for like, and went to 0.4.0 afterwards with no source change: 0.4.0 changed the client's recipes, not what a
+host implements.
 
-An app may link another gpui-agent version for a listener of its own. eBIRForms links 0.4.0 for its data listener
-beside this repository's 0.3.0 window listener, and cargo builds both. Both answered `protocol: 2` in the run of
-2026-11-24. Until the move, use the 0.3.0 command line with the window listener, as the platform sections say.
+An app that serves a gpui-agent session of its own should name the same version, so the build holds one copy.
+Use the 0.4.0 command line (`cargo install gpui-agent-cli --version =0.4.0 --locked`).
 
 ## Keybindings and app windows
 
@@ -293,7 +293,7 @@ beside the wrapper at `../runtime/web`. Then, from this repository:
 
 ```sh
 cargo build --workspace
-cargo install gpui-agent-cli --version '=0.3.0' --locked
+cargo install gpui-agent-cli --version '=0.4.0' --locked
 export GPUI_AGENT_TOKEN="$(openssl rand -hex 32)" GPUI_AGENT_ADDR=127.0.0.1:17421
 # Run from an NSH checkout so examples/gallery is available.
 GPUI_AGENT=1 /path/to/nsh-gpui-agent/target/debug/nsh-agent-web run examples/gallery --target web
@@ -362,12 +362,12 @@ GPUI_AGENT=1 target/debug/nsh-gpui-agent-ios \
 ```
 
 Use a booted Simulator's UDID (`xcrun simctl list devices booted`). Run the
-matching **gpui-agent 0.3.0 CLI** in another terminal with the same address and
+matching **gpui-agent 0.4.0 CLI** in another terminal with the same address and
 token. Install it into a dedicated directory and use that directory's binary:
 
 ```sh
-cargo install gpui-agent-cli --version "=0.3.0" --root "$HOME/.gpui-agent-0.3.0"
-export PATH="$HOME/.gpui-agent-0.3.0/bin:$PATH"
+cargo install gpui-agent-cli --version "=0.4.0" --root "$HOME/.gpui-agent-0.4.0"
+export PATH="$HOME/.gpui-agent-0.4.0/bin:$PATH"
 ```
 
 Older preinstalled CLIs can lack `press`, `scroll`, `long-press`, and
@@ -469,7 +469,7 @@ nsh run examples/gallery --target windows
 gallery must have no `rust` host configuration, which takes precedence over `NSH_RUNTIME`. The adapter starts
 only with `GPUI_AGENT=1`, a loopback address and a nonempty token.
 
-Install the client with `cargo install gpui-agent-cli --version =0.3.0` (the `gpui-agent` package has no binary).
+Install the client with `cargo install gpui-agent-cli --version =0.4.0` (the `gpui-agent` package has no binary).
 Run it in another shell with the same `GPUI_AGENT_ADDR` and `GPUI_AGENT_TOKEN`. For a screenshot saved to an
 absolute local path, use `gpui-agent screenshot --inline --out <path.png>`; without `--inline`, the output name
 must be relative to the host's screenshot directory. Native screenshots worked in this run despite the CLI help's
