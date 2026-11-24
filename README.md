@@ -314,7 +314,10 @@ reach other processes started at the same time.
 
 For a tab opened by hand, set `GPUI_AGENT_WEB_TAB=1` alongside `GPUI_AGENT=1` and open the
 printed pairing URL locally. Its fragment is removed and the key is kept in session storage
-for reloads. Only matching keys from loopback peers pair. Tab input is synthetic DOM input;
+for reloads. Only matching keys from loopback peers pair, and one key pairs one tab. While the
+paired tab is connected, another tab with the key (a duplicate, which copies session storage)
+is refused: it shows a notice and forgets the key. A reload of the paired tab pairs again,
+because its old connection closes first. Tab input is synthetic DOM input;
 paste, screenshots, viewport changes and browser controls unavailable in buwiz remain unavailable.
 Rust-root Web apps are not supported in agent mode. The token and address stay in the CLI
 environment and are not passed to Chromium. Page hooks mask secure input reads; the plug's

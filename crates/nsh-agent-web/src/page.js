@@ -461,6 +461,44 @@ throw new Error(`unknown page question ${query.query}`);
 
   if (AGENT) globalThis.nshHelloExtra = AGENT;
 
+  // One key drives one tab (`pairing.rs`): the server's hello says whether
+  // this page paired. A page refused, such as a duplicate of the paired tab
+  // (it copied the tab's session storage), says so and forgets the key, so
+  // it never pairs later in the paired tab's place.
+  function refuse() {
+    AGENT = null;
+    delete globalThis.nshHelloExtra;
+    try {
+      sessionStorage.removeItem("nsh-agent-key");
+    } catch {}
+    const notice = document.createElement("div");
+    notice.setAttribute("role", "alert");
+    notice.textContent = "gpui-agent: another tab is already paired with this key, so this tab "
+      + "was refused. To pair this tab, close the other one and open the pairing URL again.";
+    notice.style.cssText = "position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 3001; "
+      + "padding: 8px 12px; border-radius: 8px; background: #b3261e; color: #fff; "
+      + "font: 13px/1.4 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;";
+    document.body.append(notice);
+  }
+  if (AGENT && typeof globalThis.WebSocket === "function") {
+    const Native = globalThis.WebSocket;
+    globalThis.WebSocket = class extends Native {
+      constructor(...args) {
+        super(...args);
+        this.addEventListener("message", (event) => {
+          if (!AGENT || typeof event.data !== "string") return;
+          let message;
+          try {
+            message = JSON.parse(event.data);
+          } catch {
+            return;
+          }
+          if (message?.type === "hello" && message.observer !== true) refuse();
+        });
+      }
+    };
+  }
+
 const handlers = globalThis.nshPageSteps ??= Object.create(null);
 for (const name of ["hit_at", "focus", "focused", "app_focused", "input_text", "editable"]) {
 handlers[name] = (args, player) => question.call(player, { ...args, query: name });

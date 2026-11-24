@@ -6,12 +6,13 @@
 //! ([`cdp`], headless unless `GPUI_AGENT_WEB_HEADED=1`). With
 //! `GPUI_AGENT_WEB_TAB=1`, a person opens the printed URL in their browser
 //! instead, and input is dispatched synthetically by [`TabNative`]. The dev
-//! server pairs the page by a key; only loopback peers are accepted, and
-//! off-machine pairing is out of scope. The agent's server listens on
+//! server pairs the page by a key, one page at a time ([`pairing`]); only
+//! loopback peers are accepted, and off-machine pairing is out of scope. The agent's server listens on
 //! `GPUI_AGENT_ADDR` and checks `GPUI_AGENT_TOKEN`, both from this process's
 //! environment.
 //!
 //! [`cdp`]: crate::cdp
+//! [`pairing`]: crate::pairing
 
 use std::{
     net::SocketAddr,
@@ -28,6 +29,7 @@ use serde_json::json;
 
 use crate::{
     cdp::{self, Browser, Page},
+    pairing::Pairing,
     tab_native::TabNative,
     ui,
     web_native::{ASK, WebNative, set_size},
@@ -58,6 +60,7 @@ pub(crate) struct WebAgent {
     _worker: WorkerHandle,
     page: Option<Arc<Page>>,
     browser: Option<Arc<Browser>>,
+    _pairing: Pairing,
     _stoppable: ui::Stoppable,
 }
 
@@ -92,7 +95,7 @@ pub(crate) fn start(
 ) -> anyhow::Result<WebAgent> {
     let stoppable = ui::Stoppable::new();
     let key = key()?;
-    crate::pairing::install(&server, key.clone());
+    let pairing = crate::pairing::install(&server, key.clone());
     server.add_page_script(include_str!("page.js").to_owned());
     let (page, browser, native): Driver = if tab_mode {
         (None, None, Box::new(TabNative::new(server.clone())))
@@ -137,6 +140,7 @@ pub(crate) fn start(
         _worker: worker,
         page,
         browser,
+        _pairing: pairing,
         _stoppable: stoppable,
     })
 }
