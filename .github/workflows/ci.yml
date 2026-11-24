@@ -77,14 +77,20 @@ jobs:
         run: cargo test --locked -p nsh-gpui-agent-linux
       - name: Lint the Linux crate
         run: cargo clippy --locked -p nsh-gpui-agent-linux --all-targets -- -D warnings
-      # The Android crate's build script compiles its Java bridge with javac and d8 (the runner's SDK and JDK), and
-      # the C dependencies need the NDK's compiler for the target.
+      # The Android crate's build script compiles its Java bridge with javac and d8 (the runner's SDK and JDK). The C
+      # dependencies need the NDK's compiler, and the ones that generate bindings need its headers, set up the way
+      # NSH's own command line does it (crates/nsh-cli/src/android.rs).
       - name: Check the Android crate
         run: |
-          ndk="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          export CC_aarch64_linux_android="$ndk/aarch64-linux-android26-clang"
-          export AR_aarch64_linux_android="$ndk/llvm-ar"
+          toolchain="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+          export CC_aarch64_linux_android="$toolchain/bin/aarch64-linux-android26-clang"
+          export AR_aarch64_linux_android="$toolchain/bin/llvm-ar"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+          extra="--target=aarch64-linux-android26 --sysroot=\"$toolchain/sysroot\""
+          for include in "$toolchain"/lib/clang/*/include; do
+            if [ -d "$include" ]; then extra="$extra -idirafter \"$include\""; break; fi
+          done
+          export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="$extra"
           cargo check --locked -p nsh-gpui-agent-android --target aarch64-linux-android
 
   macos:
