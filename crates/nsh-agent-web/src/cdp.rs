@@ -6,12 +6,26 @@
 //! (`Input.dispatch*`), which pages cannot tell from a user's.
 //!
 //! nsh finds the browser installed on this machine ([`find`]) and never
-//! fetches one. The protocol's calls go over one WebSocket, one at a time,
-//! each waiting for its answer; the few events the browser sends without
-//! being asked are skipped.
+//! fetches one. The protocol's calls go one at a time, each waiting for its
+//! answer; the few events the browser sends without being asked are
+//! skipped.
+//!
+//! On Linux and macOS the protocol goes over two pipes the browser inherits
+//! (`--remote-debugging-pipe`): it reads calls on its descriptor 3 and
+//! writes answers and events on its descriptor 4, each message a JSON
+//! document ended by a NUL byte. The browser listens on no socket, so no
+//! other process on the machine can drive it. No other descriptor of this
+//! process reaches the browser.
+//!
+//! On Windows the protocol still goes over a WebSocket on a loopback port
+//! the browser picks (`--remote-debugging-port=0`), which any process on
+//! the machine can connect to while the browser runs. Chromium's pipes
+//! there (`--remote-debugging-io-pipes`) need handles the browser inherits,
+//! and the standard library cannot limit a child to the handles it is
+//! meant to have: the pipes would reach every process this one starts
+//! meanwhile.
 
 use std::{
-    net::TcpStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -22,7 +36,6 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use tungstenite::{Message, WebSocket, stream::MaybeTlsStream};
 
 use crate::ui;
 
@@ -118,7 +131,7 @@ fn candidates() -> Vec<PathBuf> {
 /// ([`Browser::close`]) or dropped.
 pub(crate) struct Browser {
     child: Mutex<Child>,
-    socket: Mutex<WebSocket<MaybeTlsStream<TcpStream>>>,
+    transport: Mutex<transport::Transport>,
     next: AtomicU64,
     /// Its profile, removed after it.
     profile: Profile,
@@ -150,51 +163,10 @@ impl Browser {
         std::fs::create_dir_all(&profile.0)
             .map_err(|e| format!("cannot make {}: {e}", profile.0.display()))?;
         let mut command = command(exe, headed, &profile.0);
-        let (mut child, output) =
-            ui::quiet(&mut command).map_err(|e| format!("cannot start {}: {e}", exe.display()))?;
-        let port_file = profile.0.join("DevToolsActivePort");
-        let deadline = Instant::now() + START;
-        let url = loop {
-            if let Ok(text) = std::fs::read_to_string(&port_file) {
-                let mut lines = text.lines();
-                if let (Some(port), Some(path)) = (lines.next(), lines.next()) {
-                    break format!("ws://127.0.0.1:{}{}", port.trim(), path.trim());
-                }
-            }
-            if let Ok(Some(status)) = child.try_wait() {
-                return Err(format!(
-                    "{} exited with {status} as it started{}",
-                    exe.display(),
-                    indented(&output.text())
-                ));
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "{} did not start in {} s{}",
-                    exe.display(),
-                    START.as_secs(),
-                    indented(&output.text())
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        let socket = match tungstenite::connect(url.as_str()) {
-            Ok((socket, _)) => socket,
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("cannot connect to {}: {e}", exe.display()));
-            }
-        };
-        if let MaybeTlsStream::Plain(stream) = socket.get_ref() {
-            let _ = stream.set_read_timeout(Some(POLL));
-            let _ = stream.set_nodelay(true);
-        }
+        let (child, output, transport) = transport::start(&mut command, exe, &profile.0)?;
         Ok(Browser {
             child: Mutex::new(child),
-            socket: Mutex::new(socket),
+            transport: Mutex::new(transport),
             next: AtomicU64::new(1),
             profile,
             output,
@@ -259,15 +231,15 @@ impl Browser {
         if let Some(session) = session {
             message["sessionId"] = session.into();
         }
-        let mut socket = self.socket.lock().unwrap_or_else(|e| e.into_inner());
-        socket
-            .send(Message::text(message.to_string()))
+        let mut transport = self.transport.lock().unwrap_or_else(|e| e.into_inner());
+        transport
+            .send(message.to_string())
             .map_err(|e| format!("the browser is gone: {e}"))?;
         let deadline = Instant::now() + CALL;
         loop {
-            match socket.read() {
-                Ok(Message::Text(text)) => {
-                    let Ok(reply) = serde_json::from_str::<Value>(&text) else {
+            match transport.receive() {
+                Received::Message(text) => {
+                    let Ok(reply) = serde_json::from_slice::<Value>(&text) else {
                         continue;
                     };
                     // Events, and answers to calls that gave up waiting.
@@ -280,13 +252,7 @@ impl Browser {
                     }
                     return Ok(reply.get("result").cloned().unwrap_or(Value::Null));
                 }
-                Ok(_) => {}
-                Err(tungstenite::Error::Io(err))
-                    if matches!(
-                        err.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
+                Received::Nothing => {
                     if Instant::now() >= deadline {
                         return Err(format!(
                             "the browser did not answer {method} in {} s",
@@ -294,7 +260,7 @@ impl Browser {
                         ));
                     }
                 }
-                Err(e) => return Err(format!("the browser is gone: {e}")),
+                Received::Gone(e) => return Err(format!("the browser is gone: {e}")),
             }
         }
     }
@@ -348,8 +314,7 @@ fn command(exe: &Path, headed: bool, profile: &Path) -> Command {
         command.arg("--headless");
     }
     command
-        // The port it picks goes into the profile's DevToolsActivePort.
-        .arg("--remote-debugging-port=0")
+        .arg(transport::FLAG)
         .arg(format!("--user-data-dir={}", profile.display()))
         .args([
             "--no-first-run",
@@ -440,6 +405,301 @@ impl Drop for Page {
     }
 }
 
+/// What a read of the browser's messages gave.
+enum Received {
+    /// An answer or an event.
+    Message(Vec<u8>),
+    /// Nothing, for [`POLL`].
+    Nothing,
+    /// The browser is gone, and why.
+    Gone(String),
+}
+
+/// `exe`, started as `child`, did not start: it is stopped, and the error
+/// says how it went (`exited`: it had gone by itself).
+fn not_started(child: &mut Child, exe: &Path, output: &ui::Tail, why: String) -> String {
+    if let Ok(Some(status)) = child.try_wait() {
+        return format!(
+            "{} exited with {status} as it started{}",
+            exe.display(),
+            indented(&output.text())
+        );
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    format!("{why}{}", indented(&output.text()))
+}
+
+/// The protocol over two pipes the browser inherits as its descriptors 3
+/// (calls) and 4 (answers and events).
+#[cfg(unix)]
+mod transport {
+    use std::{
+        io::{self, BufRead, BufReader, PipeReader, PipeWriter, Write},
+        os::{
+            fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+            unix::process::CommandExt,
+        },
+        path::Path,
+        process::{Child, Command},
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+
+    use serde_json::{Value, json};
+
+    use super::{POLL, Received, START, not_started};
+    use crate::ui;
+
+    /// The flag that hands the browser the pipes; it opens no port.
+    pub(super) const FLAG: &str = "--remote-debugging-pipe";
+
+    /// The lowest descriptor the browser's ends have here, above the 3 and
+    /// 4 the browser gets them as: putting one in place never closes the
+    /// other. Every descriptor from here up is closed in the browser.
+    const ABOVE: RawFd = 5;
+
+    pub(super) struct Transport {
+        calls: PipeWriter,
+        /// The browser's messages, read by a thread of their own.
+        messages: mpsc::Receiver<Vec<u8>>,
+    }
+
+    impl Transport {
+        pub(super) fn send(&mut self, text: String) -> io::Result<()> {
+            let mut bytes = text.into_bytes();
+            bytes.push(0);
+            self.calls.write_all(&bytes)
+        }
+
+        pub(super) fn receive(&mut self) -> Received {
+            match self.messages.recv_timeout(POLL) {
+                Ok(message) => Received::Message(message),
+                Err(mpsc::RecvTimeoutError::Timeout) => Received::Nothing,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    Received::Gone("its DevTools pipe closed".into())
+                }
+            }
+        }
+    }
+
+    /// Starts `command` (`exe`) with the pipes, and waits for its first
+    /// answer: the browser, its output and the pipes.
+    pub(super) fn start(
+        command: &mut Command,
+        exe: &Path,
+        _profile: &Path,
+    ) -> Result<(Child, ui::Tail, Transport), String> {
+        let cannot = |e: io::Error| format!("cannot start {}: {e}", exe.display());
+        let (browser_calls, calls) = io::pipe().map_err(cannot)?;
+        let (messages, browser_messages) = io::pipe().map_err(cannot)?;
+        let browser_calls = above(browser_calls.into()).map_err(cannot)?;
+        let browser_messages = above(browser_messages.into()).map_err(cannot)?;
+        let messages = read(messages).map_err(cannot)?;
+        inherit(
+            command,
+            browser_calls.as_raw_fd(),
+            browser_messages.as_raw_fd(),
+        );
+        let spawned = ui::quiet(command);
+        // The browser's ends are its alone: once it is gone, reads here end.
+        drop((browser_calls, browser_messages));
+        let (mut child, output) = spawned.map_err(cannot)?;
+        let mut transport = Transport { calls, messages };
+        let deadline = Instant::now() + START;
+        let hello = json!({ "id": 0, "method": "Browser.getVersion" }).to_string();
+        if let Err(e) = transport.send(hello) {
+            let why = format!("cannot connect to {}: {e}", exe.display());
+            return Err(not_started(&mut child, exe, &output, why));
+        }
+        loop {
+            match transport.receive() {
+                Received::Message(text) => {
+                    let id = serde_json::from_slice::<Value>(&text)
+                        .ok()
+                        .and_then(|reply| reply.get("id").and_then(Value::as_u64));
+                    if id == Some(0) {
+                        return Ok((child, output, transport));
+                    }
+                }
+                Received::Nothing => {
+                    if matches!(child.try_wait(), Ok(Some(_))) || Instant::now() >= deadline {
+                        let why =
+                            format!("{} did not start in {} s", exe.display(), START.as_secs());
+                        return Err(not_started(&mut child, exe, &output, why));
+                    }
+                }
+                Received::Gone(e) => {
+                    // A browser closes its pipes as it exits: a moment for
+                    // it to have exited.
+                    let exits = Instant::now() + Duration::from_secs(1);
+                    while matches!(child.try_wait(), Ok(None)) && Instant::now() < exits {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    let why = format!("cannot connect to {}: {e}", exe.display());
+                    return Err(not_started(&mut child, exe, &output, why));
+                }
+            }
+        }
+    }
+
+    /// `fd` again, at [`ABOVE`] or higher, closed on exec.
+    fn above(fd: OwnedFd) -> io::Result<OwnedFd> {
+        // SAFETY: `fd` is open; the copy is owned by nothing else.
+        let copy = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, ABOVE) };
+        if copy < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `copy` was just opened, and is owned here alone.
+        Ok(unsafe { OwnedFd::from_raw_fd(copy) })
+    }
+
+    /// Makes the browser's ends its descriptors 3 and 4, and closes every
+    /// descriptor from [`ABOVE`] up when it starts (whatever else of this
+    /// process was not to be closed on exec).
+    fn inherit(command: &mut Command, calls: RawFd, messages: RawFd) {
+        let limit = open_limit();
+        // SAFETY: between fork and exec the closure only calls `dup2` and
+        // `fcntl`, which are async-signal-safe, and allocates nothing.
+        // Descriptors are marked closed-on-exec, not closed: the standard
+        // library reports a failed exec through one of them.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(calls, 3) < 0 || libc::dup2(messages, 4) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                for fd in ABOVE..limit {
+                    libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                }
+                Ok(())
+            });
+        }
+    }
+
+    /// One more than the highest descriptor this process can open (its
+    /// `RLIMIT_NOFILE`, at most 2^20).
+    fn open_limit() -> RawFd {
+        const MOST: RawFd = 1 << 20;
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `getrlimit` only writes `limit`.
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+            return MOST;
+        }
+        RawFd::try_from(limit.rlim_cur).map_or(MOST, |n| n.min(MOST))
+    }
+
+    /// The messages on `pipe`, as a thread reads them; it ends when the
+    /// browser closes its end.
+    fn read(pipe: PipeReader) -> io::Result<mpsc::Receiver<Vec<u8>>> {
+        let (sender, messages) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("nsh-browser-pipe".into())
+            .spawn(move || {
+                let mut pipe = BufReader::new(pipe);
+                loop {
+                    let mut message = Vec::new();
+                    // A message without its NUL: the browser went as it
+                    // wrote.
+                    match pipe.read_until(0, &mut message) {
+                        Ok(_) if message.pop() == Some(0) => {
+                            if sender.send(message).is_err() {
+                                return;
+                            }
+                        }
+                        _ => return,
+                    }
+                }
+            })?;
+        Ok(messages)
+    }
+}
+
+/// The protocol over a WebSocket on a loopback port the browser picks: see
+/// the module's documentation for why Windows does not use the pipes.
+#[cfg(windows)]
+mod transport {
+    use std::{
+        net::TcpStream,
+        path::Path,
+        process::{Child, Command},
+        time::{Duration, Instant},
+    };
+
+    use tungstenite::{Message, WebSocket, stream::MaybeTlsStream};
+
+    use super::{POLL, Received, START, not_started};
+    use crate::ui;
+
+    /// The port it picks goes into the profile's `DevToolsActivePort`.
+    pub(super) const FLAG: &str = "--remote-debugging-port=0";
+
+    pub(super) struct Transport(WebSocket<MaybeTlsStream<TcpStream>>);
+
+    impl Transport {
+        pub(super) fn send(&mut self, text: String) -> Result<(), tungstenite::Error> {
+            self.0.send(Message::text(text))
+        }
+
+        pub(super) fn receive(&mut self) -> Received {
+            match self.0.read() {
+                Ok(Message::Text(text)) => Received::Message(text.as_str().as_bytes().to_vec()),
+                Ok(_) => Received::Nothing,
+                Err(tungstenite::Error::Io(err))
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    Received::Nothing
+                }
+                Err(e) => Received::Gone(e.to_string()),
+            }
+        }
+    }
+
+    /// Starts `command` (`exe`) on `profile`, waits for the port it picks
+    /// and connects to it: the browser, its output and the connection.
+    pub(super) fn start(
+        command: &mut Command,
+        exe: &Path,
+        profile: &Path,
+    ) -> Result<(Child, ui::Tail, Transport), String> {
+        let (mut child, output) =
+            ui::quiet(command).map_err(|e| format!("cannot start {}: {e}", exe.display()))?;
+        let port_file = profile.join("DevToolsActivePort");
+        let deadline = Instant::now() + START;
+        let url = loop {
+            if let Ok(text) = std::fs::read_to_string(&port_file) {
+                let mut lines = text.lines();
+                if let (Some(port), Some(path)) = (lines.next(), lines.next()) {
+                    break format!("ws://127.0.0.1:{}{}", port.trim(), path.trim());
+                }
+            }
+            if matches!(child.try_wait(), Ok(Some(_))) || Instant::now() >= deadline {
+                let why = format!("{} did not start in {} s", exe.display(), START.as_secs());
+                return Err(not_started(&mut child, exe, &output, why));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let socket = match tungstenite::connect(url.as_str()) {
+            Ok((socket, _)) => socket,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("cannot connect to {}: {e}", exe.display()));
+            }
+        };
+        if let MaybeTlsStream::Plain(stream) = socket.get_ref() {
+            let _ = stream.set_read_timeout(Some(POLL));
+            let _ = stream.set_nodelay(true);
+        }
+        Ok((child, output, Transport(socket)))
+    }
+}
+
 /// `text` (the browser's output) on lines of its own, if there is any.
 fn indented(text: &str) -> String {
     if text.trim().is_empty() {
@@ -460,15 +720,24 @@ mod tests {
         assert!(!profile.exists());
     }
 
+    /// A fake browser, `script` (with its `#!` line), in a directory of its
+    /// own: the directory, the browser and the profile to start it on.
     #[cfg(unix)]
-    fn failed_launch_fixture(name: &str, body: &str) -> (String, bool) {
+    fn fake_browser(name: &str, script: &str) -> (PathBuf, PathBuf, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("nsh-failed-{name}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("nsh-fake-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let exe = root.join("browser");
-        let profile = root.join("profile");
-        std::fs::write(&exe, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::write(&exe, script).unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let profile = root.join("profile");
+        (root, exe, profile)
+    }
+
+    #[cfg(unix)]
+    fn failed_launch_fixture(name: &str, body: &str) -> (String, bool) {
+        let (root, exe, profile) =
+            fake_browser(&format!("failed-{name}"), &format!("#!/bin/sh\n{body}"));
         let error = Browser::launch_in(&exe, false, profile.clone())
             .err()
             .unwrap();
@@ -488,12 +757,99 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn failed_connection_removes_the_profile() {
-        let (error, profile_removed) = failed_launch_fixture(
-            "connect",
-            "for arg in \"$@\"; do case \"$arg\" in --user-data-dir=*) profile=${arg#*=};; esac; done\nprintf '0\\n/not-a-browser\\n' > \"$profile/DevToolsActivePort\"\nexec sleep 60\n",
-        );
+        // It runs on, but closes the pipes without answering.
+        let (error, profile_removed) =
+            failed_launch_fixture("connect", "exec 3<&- 4>&-\nexec sleep 60\n");
         assert!(error.contains("cannot connect"), "{error}");
         assert!(profile_removed);
+    }
+
+    /// A browser that answers each call on its descriptor 4, after an event,
+    /// with whether descriptor `leak` reached it, and exits once closed.
+    #[cfg(unix)]
+    fn pipe_browser(leak: i32) -> String {
+        format!(
+            r#"#!/usr/bin/env bash
+leaked=false
+[ -e /dev/fd/{leak} ] && leaked=true
+while IFS= read -r -d '' call <&3; do
+  id=${{call#*\"id\":}}
+  id=${{id%%,*}}
+  case "$call" in
+    *'"Browser.close"'*) printf '{{"id":%s,"result":{{}}}}\0' "$id" >&4; exit 0;;
+    *'"Fake.refuse"'*) printf '{{"id":%s,"error":{{"message":"no"}}}}\0' "$id" >&4;;
+    *) printf '{{"method":"Fake.event","params":{{"id":%s}}}}\0{{"id":%s,"result":{{"leaked":%s}}}}\0' "$id" "$id" "$leaked" >&4;;
+  esac
+done
+"#
+        )
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_browser_talks_over_its_pipes_and_inherits_nothing_else() {
+        // A descriptor of this process not closed on exec, above 3 and 4.
+        // SAFETY: `fcntl` copies standard error; the copy is closed below.
+        let leak = unsafe { libc::fcntl(2, libc::F_DUPFD, 10) };
+        assert!(leak >= 10);
+        let (root, exe, profile) = fake_browser("pipe", &pipe_browser(leak));
+        let browser = Browser::launch_in(&exe, false, profile.clone()).unwrap();
+        // SAFETY: `leak` is ours and open.
+        unsafe { libc::close(leak) };
+        assert_eq!(
+            browser.call(None, "Fake.call", json!({})).unwrap(),
+            json!({ "leaked": false })
+        );
+        assert_eq!(
+            browser
+                .call(Some("session"), "Fake.refuse", json!({}))
+                .unwrap_err(),
+            "the browser refused Fake.refuse: no"
+        );
+        assert!(browser.alive());
+        browser.close();
+        assert!(!browser.alive());
+        assert!(!profile.exists());
+        assert!(
+            browser
+                .call(None, "Fake.call", json!({}))
+                .unwrap_err()
+                .contains("gone")
+        );
+        drop(browser);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_browser_opens_no_devtools_port() {
+        for headed in [false, true] {
+            let command = command(Path::new("chrome"), headed, Path::new("/tmp/profile"));
+            let args: Vec<_> = command.get_args().collect();
+            assert!(args.iter().any(|arg| *arg == "--remote-debugging-pipe"));
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg.to_string_lossy().starts_with("--remote-debugging-port")),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn on_windows_the_browser_still_opens_a_loopback_port() {
+        let command = command(Path::new("chrome"), false, Path::new("C:\\profile"));
+        assert!(
+            command
+                .get_args()
+                .any(|arg| arg == "--remote-debugging-port=0")
+        );
+        assert!(
+            !command
+                .get_args()
+                .any(|arg| arg == "--remote-debugging-pipe")
+        );
     }
 
     #[test]

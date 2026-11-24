@@ -305,7 +305,12 @@ gpui-agent screenshot --out gallery.png
 
 With `GPUI_AGENT` unset the wrapper runs the ordinary NSH CLI. Chromium is found on `PATH`
 (Chrome for Testing works); nothing downloads a browser. The default is an owned headless
-browser at 1280×800. `GPUI_AGENT_WEB_HEADED=1` shows it in a window.
+browser at 1280×800. `GPUI_AGENT_WEB_HEADED=1` shows it in a window. On Linux and macOS the
+tool talks to that browser over two inherited pipes (`--remote-debugging-pipe`), so the browser
+opens no DevTools port. On Windows it still uses a DevTools port on 127.0.0.1
+(`--remote-debugging-port=0`), and any local process can connect to that port while the browser
+runs. Standard Rust cannot limit which handles a child process inherits, so the pipes would also
+reach other processes started at the same time.
 
 For a tab opened by hand, set `GPUI_AGENT_WEB_TAB=1` alongside `GPUI_AGENT=1` and open the
 printed pairing URL locally. Its fragment is removed and the key is kept in session storage
