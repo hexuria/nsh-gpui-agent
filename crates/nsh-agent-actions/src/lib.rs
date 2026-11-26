@@ -784,11 +784,61 @@ impl Agent {
         // under the software keyboard (a person types into it there too):
         // only a press to focus it needs a point that is clear.
         if self.native.focused() != Some(id) {
-            let at = self.node_point(id)?;
-            self.native.press(at);
+            self.press_to_focus(id, &node)?;
         }
         self.native.type_text(text);
         self.settled()
+    }
+
+    /// Presses input `id` (`node`) to give it the focus. An input under an
+    /// overlay of its own component (NSH's `OtpInput` / pin cells: the cells
+    /// over the text field that takes the keys, under the same parent) is
+    /// pressed on the overlay, as a finger does, and the press must then
+    /// have given the input the focus. Any other occluder refuses the press.
+    fn press_to_focus(&self, id: NodeId, node: &SemanticNode) -> Result<(), String> {
+        let error = match self.node_point(id) {
+            Ok(at) => {
+                self.native.press(at);
+                return Ok(());
+            }
+            Err(error) => error,
+        };
+        let Some(hit) = error
+            .strip_prefix("occluded_by: ")
+            .and_then(|rest| rest.parse::<NodeId>().ok())
+        else {
+            return Err(error);
+        };
+        let Some(component) = node.parent else {
+            return Err(error);
+        };
+        let nodes = self.scene.semantic_tree()?;
+        let parents = mounted_parents(&nodes);
+        let another_input = nodes
+            .iter()
+            .any(|other| other.id == hit && other.input && other.id != id);
+        if another_input || !is_descendant_or_same(hit, component, &parents) {
+            return Err(error);
+        }
+        let viewport = Bounds::new(Point::default(), self.native.viewport());
+        let Some(visible) = self
+            .native
+            .bounds(id)
+            .and_then(|bounds| intersection(viewport, bounds))
+        else {
+            return Err(error);
+        };
+        let at = self.clear_of_keyboard(visible, visible.center(), false, &format!("node {id}"))?;
+        self.native.press(at);
+        self.settled()?;
+        if self.native.focused() == Some(id) {
+            Ok(())
+        } else {
+            Err(format!(
+                "{error}: a press on its overlay at ({}, {}) did not give node {id} the focus",
+                at.x.0, at.y.0
+            ))
+        }
     }
 
     /// Replaces the value of input `id`.
@@ -807,8 +857,7 @@ impl Agent {
             return Err(format!("node {id} is disabled"));
         }
         if self.native.focused() != Some(id) {
-            let at = self.node_point(id)?;
-            self.native.press(at);
+            self.press_to_focus(id, &node)?;
         }
         self.native.key(Key::SelectAll);
         self.native.key(Key::Backspace);

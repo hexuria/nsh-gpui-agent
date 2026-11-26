@@ -190,6 +190,9 @@ impl Native for GateNative {
         self.presses
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.pressed_at.lock().unwrap().push(at);
+        if let Some(id) = GATE_FOCUS_ON_PRESS.with(std::cell::Cell::get) {
+            GATE_FOCUSED.with(|focused| focused.set(Some(id)));
+        }
     }
     fn long_press(&self, at: Point<Points>, hold: Duration) {
         self.record("long_press", Some(at));
@@ -257,6 +260,8 @@ thread_local! {
     static GATE_KEYBOARD: std::cell::Cell<Option<Bounds<Points>>> = const { std::cell::Cell::new(None) };
     /// The focused input [`GateNative`] reports on this test's thread.
     static GATE_FOCUSED: std::cell::Cell<Option<NodeId>> = const { std::cell::Cell::new(None) };
+    /// The input a press gives the focus to, on this test's thread.
+    static GATE_FOCUS_ON_PRESS: std::cell::Cell<Option<NodeId>> = const { std::cell::Cell::new(None) };
 }
 
 impl StrictNative for GateNative {
@@ -3047,4 +3052,75 @@ fn a_keyboard_frame_counts_once_it_has_stayed_put() {
     assert_eq!(track.settled, shown);
     assert_eq!(track.observe(None, hide + KEYBOARD_SETTLE), None);
     assert_eq!(track.settled, None);
+}
+
+/// An OTP-like component: group 2 holds input 3 and cell 4 over it, and
+/// node 5 sits beside the group; every hit is `hit`, and a press gives the
+/// focus to `focus_on_press`.
+fn overlay_agent(
+    hit: NodeId,
+    focus_on_press: Option<NodeId>,
+) -> (
+    Agent,
+    Arc<Mutex<Vec<Point<Points>>>>,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    GATE_KEYBOARD.with(|frame| frame.set(None));
+    GATE_FOCUSED.with(|id| id.set(None));
+    GATE_FOCUS_ON_PRESS.with(|id| id.set(focus_on_press));
+    let field = Bounds::new(point(px(10.0), px(10.0)), size(px(60.0), px(20.0)));
+    let pressed_at = Arc::new(Mutex::new(Vec::new()));
+    let typed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut input = semantic_node(3, Some(2), false, SemanticTarget::View);
+    input.input = true;
+    let agent = Agent::requiring_native_hit_test(
+        target_scene(vec![
+            semantic_node(1, None, false, SemanticTarget::View),
+            semantic_node(2, Some(1), false, SemanticTarget::View),
+            input,
+            semantic_node(4, Some(2), false, SemanticTarget::View),
+            semantic_node(5, Some(1), false, SemanticTarget::View),
+        ]),
+        Box::new(GateNative {
+            windows: None,
+            bounds: [(2, field), (3, field), (4, field), (5, field)].into(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(hit)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pressed_at: pressed_at.clone(),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: typed.clone(),
+            viewport: size(px(100.0), px(100.0)),
+        }),
+    );
+    (agent, pressed_at, typed)
+}
+
+#[test]
+fn an_input_under_its_own_overlay_is_focused_through_the_overlay() {
+    let (agent, pressed_at, typed) = overlay_agent(4, Some(3));
+    agent.type_node(3, "123456").unwrap();
+    assert_eq!(*pressed_at.lock().unwrap(), vec![point(px(40.0), px(20.0))]);
+    assert_eq!(typed.load(std::sync::atomic::Ordering::Relaxed), 1);
+    GATE_FOCUS_ON_PRESS.with(|id| id.set(None));
+    GATE_FOCUSED.with(|id| id.set(None));
+}
+
+#[test]
+fn an_input_under_another_view_is_not_pressed() {
+    let (agent, pressed_at, typed) = overlay_agent(5, Some(3));
+    let error = agent.type_node(3, "1").unwrap_err();
+    assert!(error.starts_with("occluded_by: 5"), "{error}");
+    assert!(pressed_at.lock().unwrap().is_empty());
+    assert_eq!(typed.load(std::sync::atomic::Ordering::Relaxed), 0);
+    GATE_FOCUS_ON_PRESS.with(|id| id.set(None));
+}
+
+#[test]
+fn an_overlay_press_that_does_not_focus_the_input_fails_and_types_nothing() {
+    let (agent, _, typed) = overlay_agent(4, None);
+    let error = agent.type_node(3, "1").unwrap_err();
+    assert!(error.contains("did not give node 3 the focus"), "{error}");
+    assert_eq!(typed.load(std::sync::atomic::Ordering::Relaxed), 0);
 }
