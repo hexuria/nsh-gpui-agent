@@ -500,6 +500,14 @@ impl KeyboardTrack {
     /// Takes the frame read at `now`; `None` when it has settled (then
     /// [`KeyboardTrack::settled`] is it), else when it will have.
     fn observe(&mut self, read: Option<Bounds<Points>>, now: Instant) -> Option<Instant> {
+        // No keyboard at the first look (a desktop, a phone with none up):
+        // nothing to wait for.
+        if self.last.is_none() && read.is_none() {
+            self.last = Some(None);
+            self.since = Some(now);
+            self.settled = None;
+            return None;
+        }
         if self.last != Some(read) {
             self.last = Some(read);
             self.since = Some(now);
@@ -674,7 +682,7 @@ impl Agent {
 
     /// Clicks semantic node `id`, after native actionability is established.
     pub fn press_node(&self, id: NodeId) -> Result<(), String> {
-        self.settled()?;
+        self.settled_and_keyboard()?;
         let selector = format!("node {id}");
         let nodes = self.scene.semantic_tree()?;
         let target = nodes
@@ -755,6 +763,16 @@ impl Agent {
         }
     }
 
+    /// [`Agent::settled`], then the software keyboard settled too
+    /// ([`Agent::keyboard_frame`]): a step reads the tree only once the
+    /// keyboard has stopped moving, so a control `adjustResize` moved
+    /// above the keyboard is where the tree says.
+    fn settled_and_keyboard(&self) -> Result<(), String> {
+        self.settled()?;
+        let _ = self.keyboard_frame();
+        Ok(())
+    }
+
     /// Whether the platform can tell where the software keyboard is.
     pub fn keyboard_known(&self) -> bool {
         self.native.keyboard_frame().is_ok()
@@ -793,8 +811,10 @@ impl Agent {
     /// Presses input `id` (`node`) to give it the focus. An input under an
     /// overlay of its own component (NSH's `OtpInput` / pin cells: the cells
     /// over the text field that takes the keys, under the same parent) is
-    /// pressed on the overlay, as a finger does, and the press must then
-    /// have given the input the focus. Any other occluder refuses the press.
+    /// pressed on the overlay, as a finger does, only when nothing there
+    /// takes the press itself ([`Agent::overlay_passes`]); the point is
+    /// re-hit-tested, and the press must then have given the input the
+    /// focus. Any other occluder refuses the press.
     fn press_to_focus(&self, id: NodeId, node: &SemanticNode) -> Result<(), String> {
         let error = match self.node_point(id) {
             Ok(at) => {
@@ -813,22 +833,42 @@ impl Agent {
             return Err(error);
         };
         let nodes = self.scene.semantic_tree()?;
-        let parents = mounted_parents(&nodes);
-        let another_input = nodes
-            .iter()
-            .any(|other| other.id == hit && other.input && other.id != id);
-        if another_input || !is_descendant_or_same(hit, component, &parents) {
-            return Err(error);
-        }
+        let by_id: std::collections::HashMap<NodeId, &SemanticNode> =
+            nodes.iter().map(|node| (node.id, node)).collect();
+        // The input's visible part: the viewport, its bounds and every
+        // clipping view around it.
         let viewport = Bounds::new(Point::default(), self.native.viewport());
-        let Some(visible) = self
+        let Some(mut visible) = self
             .native
             .bounds(id)
             .and_then(|bounds| intersection(viewport, bounds))
         else {
             return Err(error);
         };
+        let mut parent = node.parent;
+        while let Some(ancestor) = parent.and_then(|parent| by_id.get(&parent)) {
+            if ancestor.clipping {
+                let Some(clipped) = self
+                    .native
+                    .bounds(ancestor.id)
+                    .and_then(|bounds| intersection(visible, bounds))
+                else {
+                    return Err(error);
+                };
+                visible = clipped;
+            }
+            parent = ancestor.parent;
+        }
         let at = self.clear_of_keyboard(visible, visible.center(), false, &format!("node {id}"))?;
+        if !self.overlay_passes(&nodes, hit, id, component, at) {
+            return Err(error);
+        }
+        // What is under the point now is what the press goes to.
+        match self.native.hit_at(at)? {
+            Some(now) if now == id || self.overlay_passes(&nodes, now, id, component, at) => {}
+            Some(now) => return Err(format!("occluded_by: {now}")),
+            None => return Err(error),
+        }
         self.native.press(at);
         self.settled()?;
         if self.native.focused() == Some(id) {
@@ -838,6 +878,52 @@ impl Agent {
                 "{error}: a press on its overlay at ({}, {}) did not give node {id} the focus",
                 at.x.0, at.y.0
             ))
+        }
+    }
+
+    /// Whether a press at `at` that natively hits `hit` passes through to
+    /// input `id`: `hit` is inside `component` (the input's parent), no
+    /// view from `hit` up to the component takes presses or holds itself or
+    /// is another input, and the press goes to no receiver but the input.
+    /// A touch observer (the cells of a code box) passes.
+    fn overlay_passes(
+        &self,
+        nodes: &[SemanticNode],
+        hit: NodeId,
+        id: NodeId,
+        component: NodeId,
+        at: Point<Points>,
+    ) -> bool {
+        let parents = mounted_parents(nodes);
+        let by_id: std::collections::HashMap<NodeId, &SemanticNode> =
+            nodes.iter().map(|node| (node.id, node)).collect();
+        let hidden_press_owners: std::collections::HashMap<NodeId, NodeId> = nodes
+            .iter()
+            .flat_map(|node| node.hidden_press_owners.iter().copied())
+            .collect();
+        if hidden_press_owners.contains_key(&hit) {
+            return false;
+        }
+        let mut current = Some(hit);
+        let mut inside = false;
+        while let Some(view) = current {
+            if view == component {
+                inside = true;
+                break;
+            }
+            if let Some(node) = by_id.get(&view)
+                && (node.pressable || node.long_press || (node.input && node.id != id))
+            {
+                return false;
+            }
+            current = parents.get(&view).copied().flatten();
+        }
+        if !inside {
+            return false;
+        }
+        match self.press_receiver(nodes, &by_id, &parents, &hidden_press_owners, hit, at) {
+            None => true,
+            Some(receiver) => receiver == id,
         }
     }
 
@@ -1156,7 +1242,7 @@ impl Agent {
     }
 
     fn node_point(&self, id: NodeId) -> Result<Point<Points>, String> {
-        self.settled()?;
+        self.settled_and_keyboard()?;
         let selector = format!("node {id}");
         let node = self
             .scene
@@ -1180,7 +1266,7 @@ impl Agent {
         at: Point<Points>,
         actionability: PointActionability,
     ) -> Result<(NodeId, Point<Points>), String> {
-        self.settled()?;
+        self.settled_and_keyboard()?;
         let id = self
             .native
             .hit_at(at)?
@@ -2191,6 +2277,7 @@ impl Agent {
     }
 
     fn long_press(&self, id: NodeId, hold: Option<Duration>) -> Result<(), String> {
+        self.settled_and_keyboard()?;
         let selector = &format!("view:{id}");
         self.settled()?;
         let (what, target) = match self.long_pressable(id)? {

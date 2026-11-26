@@ -3065,6 +3065,20 @@ fn overlay_agent(
     Arc<Mutex<Vec<Point<Points>>>>,
     Arc<std::sync::atomic::AtomicUsize>,
 ) {
+    overlay_agent_with(hit, focus_on_press, false)
+}
+
+/// [`overlay_agent`] whose cell 4 takes presses itself when `pressable`
+/// (a clear button or a Paste button over the box).
+fn overlay_agent_with(
+    hit: NodeId,
+    focus_on_press: Option<NodeId>,
+    pressable: bool,
+) -> (
+    Agent,
+    Arc<Mutex<Vec<Point<Points>>>>,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
     GATE_KEYBOARD.with(|frame| frame.set(None));
     GATE_FOCUSED.with(|id| id.set(None));
     GATE_FOCUS_ON_PRESS.with(|id| id.set(focus_on_press));
@@ -3078,7 +3092,7 @@ fn overlay_agent(
             semantic_node(1, None, false, SemanticTarget::View),
             semantic_node(2, Some(1), false, SemanticTarget::View),
             input,
-            semantic_node(4, Some(2), false, SemanticTarget::View),
+            semantic_node(4, Some(2), pressable, SemanticTarget::View),
             semantic_node(5, Some(1), false, SemanticTarget::View),
         ]),
         Box::new(GateNative {
@@ -3123,4 +3137,25 @@ fn an_overlay_press_that_does_not_focus_the_input_fails_and_types_nothing() {
     let error = agent.type_node(3, "1").unwrap_err();
     assert!(error.contains("did not give node 3 the focus"), "{error}");
     assert_eq!(typed.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn an_overlay_that_takes_presses_itself_is_not_pressed() {
+    let (agent, pressed_at, typed) = overlay_agent_with(4, Some(3), true);
+    let error = agent.type_node(3, "1").unwrap_err();
+    assert!(error.starts_with("occluded_by: 4"), "{error}");
+    assert!(
+        pressed_at.lock().unwrap().is_empty(),
+        "the clear button was not pressed"
+    );
+    assert_eq!(typed.load(std::sync::atomic::Ordering::Relaxed), 0);
+    GATE_FOCUS_ON_PRESS.with(|id| id.set(None));
+}
+
+#[test]
+fn no_keyboard_at_the_first_look_needs_no_wait() {
+    let start = Instant::now();
+    let mut track = KeyboardTrack::default();
+    assert_eq!(track.observe(None, start), None);
+    assert_eq!(track.settled, None);
 }

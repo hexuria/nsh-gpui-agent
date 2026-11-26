@@ -264,6 +264,20 @@ meant for a "Done" button once deleted a digit instead. So:
   nothing is refused there. Android windows that pan (`adjustPan`) are not supported: their views shift while the
   frame does not. NSH apps use `adjustResize`.
 
+## Inputs under an overlay of their own
+
+NSH's `OtpInput` (and an app's pin cells) draws its cells over the text field that takes the keys, so a press at the
+field lands on a cell. A press that focuses an input for `type` or `set_value` goes through such an overlay only when:
+- the view hit is inside the input's own parent;
+- no view from it up to that parent takes presses or holds itself, or is another input (a clear button, a Paste
+  button, a suggestion list, a wrapper of another input are refused);
+- the press would go to no receiver but the input;
+- the point, in the input's visible part clear of the keyboard, hits such a view again just before the press;
+- and the press then gives the input the focus.
+
+Otherwise it is refused (`occluded_by`). A marker on the overlay itself ("presses here go to input X") would be exact;
+it needs a door in NSH's `OtpInput`, so it waits for the kit's next pin.
+
 ## Keybindings and app windows
 
 Added on 2026-11-23 with the doors of the same day:

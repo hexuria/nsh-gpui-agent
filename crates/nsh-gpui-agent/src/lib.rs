@@ -249,6 +249,8 @@ impl AgentHost for NshAgentHost {
                 rev: None,
             };
         }
+        // The keyboard first: once it has settled, the tree is laid out for it.
+        let keyboard = self.agent.keyboard_frame();
         let Ok(nodes) = self.agent.semantic_nodes() else {
             return UiTree {
                 app: self.app.clone(),
@@ -267,7 +269,7 @@ impl AgentHost for NshAgentHost {
             })
             .map(|node| ui_node(node, &index, self.agent.as_ref()))
             .collect();
-        if let Ok(Some(frame)) = self.agent.keyboard_frame() {
+        if let Ok(Some(frame)) = keyboard {
             roots.push(keyboard_node(frame));
         }
         // A resize or a failed call while the nodes were read.
