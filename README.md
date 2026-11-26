@@ -235,6 +235,21 @@ host implements.
 An app that serves a gpui-agent session of its own should name the same version, so the build holds one copy.
 Use the 0.4.0 command line (`cargo install gpui-agent-cli --version =0.4.0 --locked`).
 
+## The software keyboard
+
+On a phone the keyboard covers part of the app, and a press there lands on a key, not on the app: a fixed-point tap
+meant for a "Done" button once deleted a digit instead. So:
+
+- **It is in the tree while it shows.** A snapshot ends with a node `system-keyboard` (role `keyboard`, not enabled)
+  whose bounds are the keyboard's frame. It is absent while the keyboard is hidden: `wait_until system-keyboard` waits
+  for the keyboard to finish coming up, `wait_until system-keyboard --absent` for it to go.
+- **A press on it is refused.** A press whose point is inside the frame fails with
+  `occluded_by: software keyboard ...`. A press on a node part of which shows above the keyboard lands on that part,
+  as a finger would; a press at a point the caller chose is never moved.
+- **Where it comes from.** Android: the window's input-method insets (API 30 and later). iOS: the window's keyboard
+  layout guide (iOS 15 and later), which follows the docked keyboard only, not a floating or undocked iPad keyboard.
+  Desktops have none. A host that can tell lists `software_keyboard` in `hello.features`.
+
 ## Keybindings and app windows
 
 Added on 2026-11-23 with the doors of the same day:

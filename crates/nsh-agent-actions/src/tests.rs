@@ -248,7 +248,16 @@ impl Native for GateNative {
     fn quit(&self) {}
 }
 
+thread_local! {
+    /// The software keyboard's frame [`GateNative`] reports on this test's
+    /// thread (the agent asks its native on the caller's thread).
+    static GATE_KEYBOARD: std::cell::Cell<Option<Bounds<Points>>> = const { std::cell::Cell::new(None) };
+}
+
 impl StrictNative for GateNative {
+    fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
+        Ok(GATE_KEYBOARD.with(std::cell::Cell::get))
+    }
     fn hit_at(&self, at: Point<Points>) -> Result<Option<NodeId>, String> {
         self.hits.lock().unwrap().push(at);
         if let Some(windows) = &self.windows {
@@ -2846,4 +2855,90 @@ fn a_swipe_without_room_to_the_edge_errors_instead_of_overshooting() {
         .unwrap_err();
 
     assert!(error.contains("no room"), "{error}");
+}
+
+/// An agent over one pressable button (node 2) at `button`, in a 100x100
+/// viewport, with the software keyboard at `keyboard`; every hit is the
+/// button. Returns the agent and where its presses landed.
+fn keyboard_agent(
+    button: Bounds<Points>,
+    keyboard: Option<Bounds<Points>>,
+) -> (Agent, Arc<Mutex<Vec<Point<Points>>>>) {
+    GATE_KEYBOARD.with(|frame| frame.set(keyboard));
+    let pressed_at = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::requiring_native_hit_test(
+        target_scene(vec![
+            semantic_node(1, None, false, SemanticTarget::View),
+            semantic_node(2, Some(1), true, SemanticTarget::View),
+        ]),
+        Box::new(GateNative {
+            windows: None,
+            bounds: [(2, button)].into(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(2)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pressed_at: pressed_at.clone(),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: size(px(100.0), px(100.0)),
+        }),
+    );
+    (agent, pressed_at)
+}
+
+#[test]
+fn a_press_clear_of_the_keyboard_lands_in_the_middle() {
+    let button = Bounds::new(point(px(0.0), px(40.0)), size(px(80.0), px(40.0)));
+    let keyboard = Bounds::new(point(px(0.0), px(85.0)), size(px(100.0), px(15.0)));
+    for frame in [None, Some(keyboard)] {
+        let (agent, pressed_at) = keyboard_agent(button, frame);
+        agent.press_node(2).unwrap();
+        assert_eq!(
+            *pressed_at.lock().unwrap(),
+            vec![button.center()],
+            "{frame:?}"
+        );
+    }
+}
+
+#[test]
+fn a_press_on_a_target_half_under_the_keyboard_lands_on_the_part_above_it() {
+    // The button is y 40..80, the keyboard starts at y 50: the middle
+    // (y 60) is on a key, the showing part is y 40..50.
+    let button = Bounds::new(point(px(0.0), px(40.0)), size(px(80.0), px(40.0)));
+    let keyboard = Bounds::new(point(px(0.0), px(50.0)), size(px(100.0), px(50.0)));
+    let (agent, pressed_at) = keyboard_agent(button, Some(keyboard));
+    agent.press_node(2).unwrap();
+    assert_eq!(*pressed_at.lock().unwrap(), vec![point(px(40.0), px(45.0))]);
+}
+
+#[test]
+fn a_press_on_a_target_under_the_keyboard_is_refused() {
+    let button = Bounds::new(point(px(0.0), px(80.0)), size(px(80.0), px(20.0)));
+    let keyboard = Bounds::new(point(px(0.0), px(70.0)), size(px(100.0), px(30.0)));
+    let (agent, pressed_at) = keyboard_agent(button, Some(keyboard));
+    let error = agent.press_node(2).unwrap_err();
+    assert!(
+        error.starts_with("occluded_by: software keyboard"),
+        "{error}"
+    );
+    assert!(pressed_at.lock().unwrap().is_empty(), "nothing was pressed");
+}
+
+#[test]
+fn a_press_at_a_point_on_the_keyboard_is_refused_and_not_moved() {
+    let button = Bounds::new(point(px(0.0), px(40.0)), size(px(80.0), px(40.0)));
+    let keyboard = Bounds::new(point(px(0.0), px(50.0)), size(px(100.0), px(50.0)));
+    let (agent, pressed_at) = keyboard_agent(button, Some(keyboard));
+    let error = agent.press_at(point(px(40.0), px(70.0))).unwrap_err();
+    assert!(
+        error.starts_with("occluded_by: software keyboard"),
+        "{error}"
+    );
+    assert!(pressed_at.lock().unwrap().is_empty(), "nothing was pressed");
+    // Above the keyboard the same button takes the press where it was asked.
+    agent.press_at(point(px(40.0), px(45.0))).unwrap();
+    assert_eq!(*pressed_at.lock().unwrap(), vec![point(px(40.0), px(45.0))]);
+    GATE_KEYBOARD.with(|frame| frame.set(None));
 }

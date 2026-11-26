@@ -283,6 +283,14 @@ pub trait StrictNative: Native {
         let _ = landscape;
         Err("rotate is not supported on this platform".into())
     }
+    /// Where the software keyboard covers the surface, in the surface's
+    /// points: `Ok(None)` while none shows (a desktop has none). `Err`
+    /// means the host cannot tell. A press whose point is inside the frame
+    /// would land on the keyboard, not on the app, and is refused.
+    fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
+        Ok(None)
+    }
+
     /// Shows or hides the software keyboard.
     fn keyboard(&self, shown: bool) -> Result<(), String> {
         let _ = shown;
@@ -676,6 +684,12 @@ impl Agent {
     /// Requests portrait or landscape orientation.
     pub fn rotate(&self, landscape: bool) -> Result<(), String> {
         self.native.rotate(landscape).and_then(|()| self.settled())
+    }
+
+    /// Where the software keyboard covers the surface now
+    /// ([`StrictNative::keyboard_frame`]).
+    pub fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
+        self.native.keyboard_frame()
     }
 
     /// Shows or hides the software keyboard.
@@ -1620,6 +1634,7 @@ impl Agent {
         } else {
             visible.center()
         };
+        let at = self.clear_of_keyboard(visible, at, explicit, selector)?;
         let parents = mounted_parents(&nodes);
         // A press on a hidden view that takes presses itself goes to it,
         // not to the target.
@@ -1776,6 +1791,45 @@ impl Agent {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// `at`, or, when the software keyboard covers it, the middle of the
+    /// part of `visible` above the keyboard's top edge, as a finger finds
+    /// the part of a control the keyboard leaves showing. A point the
+    /// caller chose (`explicit`) is not moved. Refused with `occluded_by`
+    /// when the keyboard covers the target: a press there lands on a key.
+    /// A host that cannot tell where the keyboard is leaves `at` as it is.
+    fn clear_of_keyboard(
+        &self,
+        visible: Bounds<Points>,
+        at: Point<Points>,
+        explicit: bool,
+        selector: &str,
+    ) -> Result<Point<Points>, String> {
+        let Ok(Some(keyboard)) = self.native.keyboard_frame() else {
+            return Ok(at);
+        };
+        if !keyboard.contains(&at) {
+            return Ok(at);
+        }
+        if !explicit && visible.origin.y.0 < keyboard.origin.y.0 {
+            let above = Bounds::new(
+                visible.origin,
+                Size::new(
+                    visible.size.width,
+                    Points(keyboard.origin.y.0 - visible.origin.y.0),
+                ),
+            );
+            let at = above.center();
+            if !keyboard.contains(&at) {
+                return Ok(at);
+            }
+        }
+        Err(format!(
+            "occluded_by: software keyboard (a press on `{selector}` at ({}, {}) lands on a key; \
+             hide the keyboard or scroll the target above it first)",
+            at.x.0, at.y.0
+        ))
     }
 
     /// The middle of view `id` on screen, scrolled into view first when it

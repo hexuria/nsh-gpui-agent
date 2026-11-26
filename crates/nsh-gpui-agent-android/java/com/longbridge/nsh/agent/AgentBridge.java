@@ -243,6 +243,24 @@ public final class AgentBridge {
         }, -1);
     }
 
+    /**
+     * Where the input method covers the app's window, in its pixels: x, y,
+     * width, height; an empty array while it is hidden; null when this
+     * Android cannot tell (before API 30, or before the window is attached).
+     */
+    public static float[] keyboardFrame(View host) {
+        return onMain(() -> {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null;
+            View root = host.getRootView();
+            WindowInsets insets = root.getRootWindowInsets();
+            if (insets == null) return null;
+            if (!insets.isVisible(WindowInsets.Type.ime())) return new float[0];
+            int bottom = insets.getInsets(WindowInsets.Type.ime()).bottom;
+            if (bottom <= 0) return new float[0];
+            return new float[] {0, root.getHeight() - bottom, root.getWidth(), bottom};
+        }, null);
+    }
+
     /** Pastes plain text into the focused input and restores the clipboard. */
     public static boolean paste(View host, String text) {
         Boolean done = onMain(() -> {

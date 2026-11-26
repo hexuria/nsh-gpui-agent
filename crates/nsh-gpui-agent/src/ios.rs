@@ -159,6 +159,28 @@ impl StrictNative for IosNative {
             .unwrap_or_else(|| Err("the window is gone".to_owned()))
     }
 
+    /// The docked software keyboard's frame, from the window's keyboard
+    /// layout guide (iOS 15): the guide sits on the bottom safe area while no
+    /// keyboard shows, so a guide no taller than that area is no keyboard.
+    /// A floating or undocked iPad keyboard is not followed by the guide.
+    fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
+        self.surface
+            .with_views(|_, window, _| {
+                let frame = window.keyboardLayoutGuide().layoutFrame();
+                let bottom_safe_area = window.safeAreaInsets().bottom;
+                (frame.size.height - bottom_safe_area > 1.0).then(|| {
+                    Bounds::new(
+                        Point::new(Points(frame.origin.x as f32), Points(frame.origin.y as f32)),
+                        Size::new(
+                            Points(frame.size.width as f32),
+                            Points(frame.size.height as f32),
+                        ),
+                    )
+                })
+            })
+            .ok_or_else(|| "the window is gone".to_owned())
+    }
+
     fn fire_keybinding(&self, binding: &SemanticKeybinding) -> Result<(), String> {
         let Some(id) = binding.keymap_id() else {
             return Err(NATIVE_KEYBINDING_UNSUPPORTED.into());
