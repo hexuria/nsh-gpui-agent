@@ -388,7 +388,7 @@ impl NshAgentHost {
         };
         if !self.tab_mode
             && matches!(self.platform, PlatformKind::Mobile)
-            && self.agent.keyboard_frame().is_ok()
+            && self.agent.keyboard_known()
         {
             names.push(SOFTWARE_KEYBOARD_FEATURE);
         }

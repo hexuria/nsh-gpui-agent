@@ -218,6 +218,9 @@ impl Native for GateNative {
         self.record("key", None);
         Ok(())
     }
+    fn focused(&self) -> Option<NodeId> {
+        GATE_FOCUSED.with(std::cell::Cell::get)
+    }
     fn type_text(&self, _: &str) {
         self.record("type", None);
         self.typed
@@ -252,6 +255,8 @@ thread_local! {
     /// The software keyboard's frame [`GateNative`] reports on this test's
     /// thread (the agent asks its native on the caller's thread).
     static GATE_KEYBOARD: std::cell::Cell<Option<Bounds<Points>>> = const { std::cell::Cell::new(None) };
+    /// The focused input [`GateNative`] reports on this test's thread.
+    static GATE_FOCUSED: std::cell::Cell<Option<NodeId>> = const { std::cell::Cell::new(None) };
 }
 
 impl StrictNative for GateNative {
@@ -2941,4 +2946,105 @@ fn a_press_at_a_point_on_the_keyboard_is_refused_and_not_moved() {
     agent.press_at(point(px(40.0), px(45.0))).unwrap();
     assert_eq!(*pressed_at.lock().unwrap(), vec![point(px(40.0), px(45.0))]);
     GATE_KEYBOARD.with(|frame| frame.set(None));
+}
+
+/// [`keyboard_agent`] whose node 2 is a text input, focused when `focused`.
+fn keyboard_input_agent(
+    input: Bounds<Points>,
+    keyboard: Option<Bounds<Points>>,
+    focused: bool,
+) -> (
+    Agent,
+    Arc<Mutex<Vec<Point<Points>>>>,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    GATE_KEYBOARD.with(|frame| frame.set(keyboard));
+    GATE_FOCUSED.with(|id| id.set(focused.then_some(2)));
+    let pressed_at = Arc::new(Mutex::new(Vec::new()));
+    let typed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut node = semantic_node(2, Some(1), false, SemanticTarget::View);
+    node.input = true;
+    let agent = Agent::requiring_native_hit_test(
+        target_scene(vec![
+            semantic_node(1, None, false, SemanticTarget::View),
+            node,
+        ]),
+        Box::new(GateNative {
+            windows: None,
+            bounds: [(2, input)].into(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(2)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pressed_at: pressed_at.clone(),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: typed.clone(),
+            viewport: size(px(100.0), px(100.0)),
+        }),
+    );
+    (agent, pressed_at, typed)
+}
+
+#[test]
+fn a_focused_input_under_the_keyboard_takes_typing_without_a_press() {
+    let input = Bounds::new(point(px(0.0), px(80.0)), size(px(80.0), px(20.0)));
+    let keyboard = Bounds::new(point(px(0.0), px(70.0)), size(px(100.0), px(30.0)));
+    let (agent, pressed_at, typed) = keyboard_input_agent(input, Some(keyboard), true);
+    agent.type_node(2, "12").unwrap();
+    assert!(
+        pressed_at.lock().unwrap().is_empty(),
+        "no press on the keyboard"
+    );
+    assert_eq!(typed.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+    // The same input without the focus needs a press, and the keyboard is
+    // where it would land.
+    let (agent, pressed_at, typed) = keyboard_input_agent(input, Some(keyboard), false);
+    let error = agent.type_node(2, "12").unwrap_err();
+    assert!(
+        error.starts_with("occluded_by: software keyboard"),
+        "{error}"
+    );
+    assert!(pressed_at.lock().unwrap().is_empty());
+    assert_eq!(typed.load(std::sync::atomic::Ordering::Relaxed), 0);
+    GATE_KEYBOARD.with(|frame| frame.set(None));
+    GATE_FOCUSED.with(|id| id.set(None));
+}
+
+#[test]
+fn a_sliver_above_the_keyboard_is_not_pressed() {
+    // The button is y 40..80 and the keyboard starts at y 42: 2 points
+    // show, less than a finger needs.
+    let button = Bounds::new(point(px(0.0), px(40.0)), size(px(80.0), px(40.0)));
+    let keyboard = Bounds::new(point(px(0.0), px(42.0)), size(px(100.0), px(58.0)));
+    let (agent, pressed_at) = keyboard_agent(button, Some(keyboard));
+    let error = agent.press_node(2).unwrap_err();
+    assert!(
+        error.starts_with("occluded_by: software keyboard"),
+        "{error}"
+    );
+    assert!(pressed_at.lock().unwrap().is_empty());
+    GATE_KEYBOARD.with(|frame| frame.set(None));
+}
+
+#[test]
+fn a_keyboard_frame_counts_once_it_has_stayed_put() {
+    let start = Instant::now();
+    let shown = Some(Bounds::new(
+        point(px(0.0), px(50.0)),
+        size(px(100.0), px(50.0)),
+    ));
+    let mut track = KeyboardTrack::default();
+    // The frame jumps to its end as the slide starts: not yet counted.
+    assert_eq!(track.observe(shown, start), Some(start + KEYBOARD_SETTLE));
+    assert_eq!(track.settled, None);
+    assert!(track.observe(shown, start + KEYBOARD_SETTLE / 2).is_some());
+    assert_eq!(track.observe(shown, start + KEYBOARD_SETTLE), None);
+    assert_eq!(track.settled, shown);
+    // Hiding: the old frame still counts until the new one has settled.
+    let hide = start + KEYBOARD_SETTLE * 2;
+    assert!(track.observe(None, hide).is_some());
+    assert_eq!(track.settled, shown);
+    assert_eq!(track.observe(None, hide + KEYBOARD_SETTLE), None);
+    assert_eq!(track.settled, None);
 }

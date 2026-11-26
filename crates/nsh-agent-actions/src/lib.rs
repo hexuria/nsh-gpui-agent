@@ -470,6 +470,48 @@ pub struct Agent {
     scene: std::sync::Arc<dyn SemanticScene>,
     native: Box<dyn StrictNative>,
     require_hit_test: bool,
+    keyboard: std::sync::Mutex<KeyboardTrack>,
+}
+
+/// How long the software keyboard's frame must stay the same before it
+/// counts: its slide in or out takes about 250 ms, and the platforms report
+/// the end frame as the slide starts.
+pub const KEYBOARD_SETTLE: Duration = Duration::from_millis(300);
+
+/// How much of a target must show above the software keyboard, in points,
+/// for a press on that part (all of a target shorter than this).
+const KEYBOARD_MIN_VISIBLE: f32 = 8.0;
+
+/// The longest [`Agent::keyboard_frame`] waits for a moving keyboard.
+const KEYBOARD_SETTLE_MAX: Duration = Duration::from_millis(1500);
+
+/// The keyboard frames the platform reported, and the one that settled.
+#[derive(Debug, Default)]
+struct KeyboardTrack {
+    /// The last frame read (`None` inside: no keyboard).
+    last: Option<Option<Bounds<Points>>>,
+    /// When `last` was first read.
+    since: Option<Instant>,
+    /// The last frame that stayed the same for [`KEYBOARD_SETTLE`].
+    settled: Option<Bounds<Points>>,
+}
+
+impl KeyboardTrack {
+    /// Takes the frame read at `now`; `None` when it has settled (then
+    /// [`KeyboardTrack::settled`] is it), else when it will have.
+    fn observe(&mut self, read: Option<Bounds<Points>>, now: Instant) -> Option<Instant> {
+        if self.last != Some(read) {
+            self.last = Some(read);
+            self.since = Some(now);
+        }
+        let settles = self.since.unwrap_or(now) + KEYBOARD_SETTLE;
+        if now >= settles {
+            self.settled = read;
+            None
+        } else {
+            Some(settles)
+        }
+    }
 }
 
 impl Agent {
@@ -479,6 +521,7 @@ impl Agent {
             scene,
             native,
             require_hit_test: false,
+            keyboard: std::sync::Mutex::default(),
         }
     }
 
@@ -491,6 +534,7 @@ impl Agent {
             scene,
             native,
             require_hit_test: true,
+            keyboard: std::sync::Mutex::default(),
         }
     }
 
@@ -686,10 +730,34 @@ impl Agent {
         self.native.rotate(landscape).and_then(|()| self.settled())
     }
 
-    /// Where the software keyboard covers the surface now
-    /// ([`StrictNative::keyboard_frame`]).
+    /// Where the software keyboard covers the surface once it has stopped
+    /// moving ([`StrictNative::keyboard_frame`]): a frame counts when it
+    /// has stayed the same for [`KEYBOARD_SETTLE`], so while the keyboard
+    /// slides in this waits for it to arrive, and while it slides out it
+    /// still covers where it was. Waits 1.5 s at most;
+    /// a frame that never settles counts as it was last read.
     pub fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
-        self.native.keyboard_frame()
+        let deadline = Instant::now() + KEYBOARD_SETTLE_MAX;
+        loop {
+            let read = self.native.keyboard_frame()?;
+            let now = Instant::now();
+            let mut track = self.keyboard.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(settles) = track.observe(read, now) else {
+                return Ok(track.settled);
+            };
+            drop(track);
+            if now >= deadline {
+                return Ok(read);
+            }
+            while Instant::now() < settles {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+
+    /// Whether the platform can tell where the software keyboard is.
+    pub fn keyboard_known(&self) -> bool {
+        self.native.keyboard_frame().is_ok()
     }
 
     /// Shows or hides the software keyboard.
@@ -699,7 +767,7 @@ impl Agent {
 
     /// Types `text` into input `id`, focusing it first when needed, and waits for the resulting state.
     pub fn type_node(&self, id: NodeId, text: &str) -> Result<(), String> {
-        let at = self.node_point(id)?;
+        self.settled()?;
         let node = self
             .scene
             .semantic_tree()?
@@ -709,7 +777,14 @@ impl Agent {
         if !node.input {
             return Err(format!("node {id} is not a text input"));
         }
+        if !node.enabled {
+            return Err(format!("node {id} is disabled"));
+        }
+        // An input that has the focus takes the keys where it is, even
+        // under the software keyboard (a person types into it there too):
+        // only a press to focus it needs a point that is clear.
         if self.native.focused() != Some(id) {
+            let at = self.node_point(id)?;
             self.native.press(at);
         }
         self.native.type_text(text);
@@ -718,7 +793,7 @@ impl Agent {
 
     /// Replaces the value of input `id`.
     pub fn set_value_node(&self, id: NodeId, value: &str) -> Result<(), String> {
-        let at = self.node_point(id)?;
+        self.settled()?;
         let node = self
             .scene
             .semantic_tree()?
@@ -728,7 +803,13 @@ impl Agent {
         if !node.input {
             return Err(format!("node {id} is not a text input"));
         }
-        self.native.press(at);
+        if !node.enabled {
+            return Err(format!("node {id} is disabled"));
+        }
+        if self.native.focused() != Some(id) {
+            let at = self.node_point(id)?;
+            self.native.press(at);
+        }
         self.native.key(Key::SelectAll);
         self.native.key(Key::Backspace);
         self.native.type_text(value);
@@ -748,12 +829,15 @@ impl Agent {
             return Err(format!("node {id} is disabled"));
         }
         self.native.validate_keys(keys)?;
-        let at = self.node_point(id)?;
-        if let Err(error) = self.native.focus_node(id) {
-            if node.input && error == NATIVE_FOCUS_UNSUPPORTED {
-                self.native.press(at);
-            } else {
-                return Err(error);
+        // A focused input takes the keys where it is (see `type_node`).
+        if !(node.input && self.native.focused() == Some(id)) {
+            let at = self.node_point(id)?;
+            if let Err(error) = self.native.focus_node(id) {
+                if node.input && error == NATIVE_FOCUS_UNSUPPORTED {
+                    self.native.press(at);
+                } else {
+                    return Err(error);
+                }
             }
         }
         self.native.press_keys(keys)?;
@@ -1806,13 +1890,16 @@ impl Agent {
         explicit: bool,
         selector: &str,
     ) -> Result<Point<Points>, String> {
-        let Ok(Some(keyboard)) = self.native.keyboard_frame() else {
+        let Ok(Some(keyboard)) = self.keyboard_frame() else {
             return Ok(at);
         };
         if !keyboard.contains(&at) {
             return Ok(at);
         }
-        if !explicit && visible.origin.y.0 < keyboard.origin.y.0 {
+        // A finger needs some of the target above the keyboard: all of a
+        // short one, or 8 points of a tall one.
+        let reachable = KEYBOARD_MIN_VISIBLE.min(visible.size.height.0);
+        if !explicit && keyboard.origin.y.0 - visible.origin.y.0 >= reachable {
             let above = Bounds::new(
                 visible.origin,
                 Size::new(

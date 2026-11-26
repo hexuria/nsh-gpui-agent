@@ -240,15 +240,29 @@ Use the 0.4.0 command line (`cargo install gpui-agent-cli --version =0.4.0 --loc
 On a phone the keyboard covers part of the app, and a press there lands on a key, not on the app: a fixed-point tap
 meant for a "Done" button once deleted a digit instead. So:
 
-- **It is in the tree while it shows.** A snapshot ends with a node `system-keyboard` (role `keyboard`, not enabled)
-  whose bounds are the keyboard's frame. It is absent while the keyboard is hidden: `wait_until system-keyboard` waits
-  for the keyboard to finish coming up, `wait_until system-keyboard --absent` for it to go.
+- **A frame counts once it has stopped moving.** Android's input-method insets and iOS's keyboard layout guide take
+  the keyboard's end frame as its slide starts. The agent counts a frame only after it has stayed the same for 300 ms
+  (`KEYBOARD_SETTLE`, a little longer than the slide), waiting up to 1.5 s for it. While the keyboard slides in, a
+  press waits for it to arrive; while it slides out, it still covers where it was.
+- **It is in the tree once it has settled.** A snapshot ends with a node `system-keyboard` (role `keyboard`, not
+  enabled) whose bounds are the keyboard's frame. It is absent once the keyboard has gone: `wait_until
+  system-keyboard` waits for the keyboard to finish coming up, `wait_until system-keyboard --absent` for it to finish
+  going. A snapshot taken while it moves waits for it.
 - **A press on it is refused.** A press whose point is inside the frame fails with
-  `occluded_by: software keyboard ...`. A press on a node part of which shows above the keyboard lands on that part,
-  as a finger would; a press at a point the caller chose is never moved.
-- **Where it comes from.** Android: the window's input-method insets (API 30 and later). iOS: the window's keyboard
-  layout guide (iOS 15 and later), which follows the docked keyboard only, not a floating or undocked iPad keyboard.
-  Desktops have none. A host that can tell lists `software_keyboard` in `hello.features`.
+  `occluded_by: software keyboard ...`. A press on a node of which at least 8 points (or all, if it is shorter) show
+  above the keyboard lands on that part, as a finger would; a thinner sliver is refused. A press at a point the
+  caller chose is never moved.
+- **Typing into the focused input is not a press.** `type`, `set_value` and `key` on an input that already has the
+  focus go to it even under the keyboard, as a person types into it there; only a press to focus an input needs a
+  clear point.
+- **Where it comes from.** Android: the insets of the window touches go to (a dialog's or modal's own window over
+  the app, else the app's), API 30 and later. iOS: the window's keyboard layout guide (iOS 15 and later), laid out
+  on first use so the first read is real. Desktops have none. A host that can tell lists `software_keyboard` in
+  `hello.features` (an Android window not attached yet counts as no keyboard, not as unknown).
+- **Limits: these under-refuse, never over-refuse.** A floating or undocked iPad keyboard, a floating Gboard, a
+  keyboard on another display and Android's landscape fullscreen ("extract") input method report no keyboard, so
+  nothing is refused there. Android windows that pan (`adjustPan`) are not supported: their views shift while the
+  frame does not. NSH apps use `adjustResize`.
 
 ## Keybindings and app windows
 
