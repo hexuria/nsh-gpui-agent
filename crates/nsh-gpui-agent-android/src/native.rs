@@ -436,7 +436,8 @@ impl StrictNative for AndroidStrictNative {
                     // A hole in the answer: no menu rather than a wrong one.
                     return Ok(Vec::new());
                 }
-                let string = env.get_string(&JString::from(object))?;
+                let object = JString::from(object);
+                let string = env.get_string(&object)?;
                 out.push(String::from(string));
             }
             Ok(out)
