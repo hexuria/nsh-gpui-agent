@@ -551,6 +551,32 @@ fn hold_reaches_through_own_input(
         })
 }
 
+/// Whether `keys` (one keystroke in `nsh/keymap` notation, `mod+v`) is a
+/// paste chord on some platform: V with the command or control key (Shift
+/// or Alt besides, as paste-as-plain-text has), Shift+Insert, or a paste key
+/// of its own (Android's `KEYCODE_PASTE`, X11's `XF86Paste`). Case and the
+/// `+` / `-` separator do not matter.
+pub fn is_paste_chord(keys: &str) -> bool {
+    let lower = keys.trim().to_ascii_lowercase();
+    let parts: Vec<&str> = lower
+        .split(['+', '-'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    let Some((key, modifiers)) = parts.split_last() else {
+        return false;
+    };
+    let has = |names: &[&str]| modifiers.iter().any(|m| names.contains(m));
+    match *key {
+        "v" => has(&[
+            "mod", "cmd", "command", "meta", "super", "win", "ctrl", "control",
+        ]),
+        "insert" | "ins" => has(&["shift"]),
+        "paste" | "xf86paste" | "keycode_paste" => true,
+        _ => false,
+    }
+}
+
 /// The platform's own text menu showing over an input, as read from the
 /// platform (read-only: the agent does not press its items).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1254,6 +1280,15 @@ impl Agent {
 
     /// Sends a hardware key chord after verifying the target.
     pub fn key_node(&self, id: NodeId, keys: &str) -> Result<(), String> {
+        // A paste chord pastes the system clipboard, which can hold what a
+        // person or another app copied (codes, passwords, addresses), into a
+        // field read back unmasked into proof: only a clip this run set.
+        if is_paste_chord(keys) && self.native.clipboard_set_by_agent() != Some(true) {
+            return Err(format!(
+                "`{keys}` pastes the system clipboard, which was not set by this run: give the \
+                 text with the paste op instead (it pastes that text, not the clipboard)"
+            ));
+        }
         self.settled()?;
         let node = self
             .scene

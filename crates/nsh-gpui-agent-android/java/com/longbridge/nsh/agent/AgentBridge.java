@@ -53,6 +53,18 @@ public final class AgentBridge {
      * back unmasked into proof.
      */
     static final String CLIP_LABEL = "nsh-agent:" + java.util.UUID.randomUUID();
+    /**
+     * The text of the clip this agent last put on the clipboard. The label can be seen by
+     * whatever reads the clipboard (an input method, an app in front), which could reuse it
+     * on a clip of its own: a clip is this run's only when its text is this one too.
+     */
+    private static volatile String lastClipText;
+
+    /** Puts {@code text} on the clipboard as this run's clip. */
+    private static void setAgentClip(ClipboardManager clipboard, CharSequence text) {
+        lastClipText = text == null ? null : text.toString();
+        clipboard.setPrimaryClip(ClipData.newPlainText(CLIP_LABEL, text));
+    }
     private static String agentToken;
 
     private static volatile boolean reflectionReady;
@@ -261,7 +273,7 @@ public final class AgentBridge {
                 ClipData clip = clipboard.getPrimaryClip();
                 if (clip != null && clip.getItemCount() > 0) {
                     CharSequence text = clip.getItemAt(0).coerceToText(host.getContext());
-                    clipboard.setPrimaryClip(ClipData.newPlainText(CLIP_LABEL, text));
+                    setAgentClip(clipboard, text);
                 }
             }
             return "";
@@ -274,7 +286,13 @@ public final class AgentBridge {
         if (clipboard == null || !clipboard.hasPrimaryClip()) return false;
         android.content.ClipDescription description = clipboard.getPrimaryClipDescription();
         CharSequence label = description == null ? null : description.getLabel();
-        return label != null && CLIP_LABEL.contentEquals(label);
+        if (label == null || !CLIP_LABEL.contentEquals(label)) return false;
+        // The label alone could be another's copy of it: the text must be the one set.
+        String expected = lastClipText;
+        ClipData clip = clipboard.getPrimaryClip();
+        if (expected == null || clip == null || clip.getItemCount() != 1) return false;
+        CharSequence text = clip.getItemAt(0).getText();
+        return text != null && expected.contentEquals(text);
     }
 
     /** {@code 1} when the clipboard holds a clip this run set, {@code 0} when it holds none or another's, {@code -1} when it cannot be told. */
@@ -568,7 +586,7 @@ public final class AgentBridge {
             if (clipboard == null) return false;
             ClipData previous = clipboard.getPrimaryClip();
             try {
-                clipboard.setPrimaryClip(ClipData.newPlainText(CLIP_LABEL, text));
+                setAgentClip(clipboard, text);
                 return ((EditText) focus).onTextContextMenuItem(android.R.id.paste);
             } finally {
                 if (previous == null && Build.VERSION.SDK_INT >= 28) clipboard.clearPrimaryClip();
