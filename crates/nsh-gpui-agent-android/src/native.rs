@@ -11,9 +11,9 @@ use std::{
 
 use jni::{
     JNIEnv,
-    objects::{GlobalRef, JClass, JFloatArray, JIntArray, JObject, JValue},
+    objects::{GlobalRef, JClass, JFloatArray, JIntArray, JObject, JObjectArray, JString, JValue},
 };
-use nsh_agent_actions::StrictNative;
+use nsh_agent_actions::{StrictNative, TextMenu};
 use nsh_core::{
     NodeId,
     geometry::{Bounds, Point, Points, Size},
@@ -442,6 +442,37 @@ impl StrictNative for AndroidStrictNative {
             Ok(out)
         });
         nsh_agent_actions::selections_from_triples(asked, &triples)
+    }
+
+    fn text_menu(&self) -> Option<TextMenu> {
+        let values: Vec<String> = self.call(|env, class, view| {
+            let array = env
+                .call_static_method(
+                    class,
+                    "textMenu",
+                    "(Landroid/view/View;)[Ljava/lang/String;",
+                    &[JValue::Object(view)],
+                )?
+                .l()?;
+            if array.is_null() {
+                return Ok(Vec::new());
+            }
+            let array = JObjectArray::from(array);
+            let len = env.get_array_length(&array)?;
+            let mut out = Vec::with_capacity(len as usize);
+            for index in 0..len {
+                let object = env.get_object_array_element(&array, index)?;
+                if object.is_null() {
+                    // A hole in the answer: no menu rather than a wrong one.
+                    return Ok(Vec::new());
+                }
+                let object = JString::from(object);
+                let string = env.get_string(&object)?;
+                out.push(String::from(string));
+            }
+            Ok(out)
+        });
+        TextMenu::from_strings(&values)
     }
 
     fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {

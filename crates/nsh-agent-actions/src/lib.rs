@@ -307,6 +307,13 @@ pub trait StrictNative: Native {
     fn take_failure(&self) -> Option<String> {
         None
     }
+    /// The platform's own text menu showing now ([`TextMenu`]), read
+    /// without touching it. `None` when none shows or the platform does
+    /// not say.
+    fn text_menu(&self) -> Option<TextMenu> {
+        None
+    }
+
     /// The selections of inputs `ids` as the platform holds them, read in
     /// one go (a snapshot asks for every input at once, so a host whose
     /// views live on another thread pays one hop, not one per field). Each
@@ -526,6 +533,46 @@ fn hold_reaches_through_own_input(
         })
 }
 
+/// The platform's own text menu showing over an input, as read from the
+/// platform (read-only: the agent does not press its items).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TextMenu {
+    /// Which menu: [`TextMenu::SELECTION`], [`TextMenu::INSERTION`] or
+    /// [`TextMenu::EDIT`].
+    pub kind: &'static str,
+    /// A fixed word for each visible item, in order (`cut`, `copy`, `paste`,
+    /// `select-all`, …, `other` for an item the platform does not define):
+    /// never the item's own title, which other apps may fill freely. None
+    /// for a masked field.
+    pub items: Vec<String>,
+}
+
+impl TextMenu {
+    /// The field's own toolbar over a selection it holds; the platform
+    /// draws the selection's handles with it.
+    pub const SELECTION: &'static str = "selection";
+    /// The field's own toolbar at its caret (Paste, Select all); the
+    /// platform draws the caret's handle with it.
+    pub const INSERTION: &'static str = "insertion";
+    /// A toolbar the app opened over a selection it draws itself.
+    pub const EDIT: &'static str = "edit";
+
+    /// The menu a host's bridge answered as `[kind, item, item, …]`: none
+    /// for an empty answer or a kind it does not know, so a bridge fault
+    /// shows no menu rather than a wrong one.
+    pub fn from_strings(values: &[String]) -> Option<TextMenu> {
+        let (kind, items) = values.split_first()?;
+        let kind = [Self::SELECTION, Self::INSERTION, Self::EDIT]
+            .into_iter()
+            .find(|known| *known == kind.as_str())?;
+        Some(TextMenu {
+            kind,
+            items: items.to_vec(),
+        })
+    }
+}
+
 /// The selections a host's bridge answered as flat `(id, start, end)`
 /// triples for the inputs `asked`. Strict, so a bridge fault never moves
 /// one field's selection onto another: anything but whole triples gives
@@ -706,6 +753,11 @@ impl Agent {
     /// Current native input value for `id`.
     pub fn native_input_text(&self, id: NodeId) -> Option<String> {
         self.native.input_text(id)
+    }
+
+    /// The platform's own text menu showing now ([`StrictNative::text_menu`]).
+    pub fn native_text_menu(&self) -> Option<TextMenu> {
+        self.native.text_menu()
     }
 
     /// The selections of inputs `ids` as the platform holds them

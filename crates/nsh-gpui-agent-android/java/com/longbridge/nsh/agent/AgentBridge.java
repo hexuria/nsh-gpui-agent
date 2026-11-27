@@ -15,7 +15,10 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 import android.util.SparseArray;
+import android.view.ActionMode;
 import android.view.InputDevice;
+import android.view.Menu;
+import android.view.MenuItem;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -55,6 +58,7 @@ public final class AgentBridge {
     private static Field boxOverflow;
     private static Field boxClip;
     private static Field inputEdit;
+    private static Field inputEditMenu;
     private static Field testAgentShownDialog;
 
     private AgentBridge() {}
@@ -155,6 +159,147 @@ public final class AgentBridge {
             edit.setFocusableInTouchMode(true);
             return edit.requestFocus();
         }, false);
+    }
+
+    /**
+     * The text menu Android shows over an input now, read-only: its kind, then a fixed
+     * word for each visible item in order ({@link #itemWord}: never the item's title,
+     * which an OEM or a PROCESS_TEXT app may fill with what it likes, and the snapshot
+     * lands in proof folders), and only the kind for a masked field. {@code "selection"} and {@code "insertion"}
+     * are the field's own floating toolbar (EditText's, over a selection or at the
+     * caret: Android draws the matching handles with it); {@code "edit"} is the one
+     * the kit opens over a selection it draws itself (InputBox.openEditMenu). Empty
+     * when none shows. Each call first watches every input it has not watched yet
+     * ({@link MenuWatch}), so a menu opened after the first snapshot is seen.
+     */
+    public static String[] textMenu(View host) {
+        return onMain(() -> {
+            SparseArray views = views(host);
+            String[] edit = null;
+            for (int i = 0; i < views.size(); i++) {
+                Object view = views.valueAt(i);
+                if (!inputBoxClass.isInstance(view)) continue;
+                try {
+                    EditText field = (EditText) inputEdit.get(view);
+                    if (field != null) MenuWatch.watch(field);
+                    ActionMode own = (ActionMode) inputEditMenu.get(view);
+                    if (own != null && edit == null) edit = menuOf("edit", own.getMenu(), masked(field));
+                } catch (Exception e) {
+                    Log.w("nsh", "test agent: text menu of " + views.keyAt(i) + ": " + e);
+                }
+            }
+            ActionMode shown = MenuWatch.shown;
+            if (shown != null) {
+                java.lang.ref.WeakReference<EditText> owner = MenuWatch.field;
+                return menuOf(MenuWatch.kind, shown.getMenu(), masked(owner == null ? null : owner.get()));
+            }
+            return edit != null ? edit : new String[0];
+        }, new String[0]);
+    }
+
+    /** {@code kind} and a word for each of {@code menu}'s visible items, in order; only the kind when {@code masked}. */
+    private static String[] menuOf(String kind, Menu menu, boolean masked) {
+        java.util.ArrayList<String> out = new java.util.ArrayList<>();
+        out.add(kind);
+        for (int i = 0; !masked && menu != null && i < menu.size(); i++) {
+            MenuItem item = menu.getItem(i);
+            if (item.isVisible()) out.add(itemWord(item));
+        }
+        return out.toArray(new String[0]);
+    }
+
+    /** A fixed word for a text menu item by its id; {@code "other"} for any item Android does not define. */
+    private static String itemWord(MenuItem item) {
+        int id = item.getItemId();
+        if (id == android.R.id.cut) return "cut";
+        if (id == android.R.id.copy) return "copy";
+        if (id == android.R.id.paste) return "paste";
+        if (id == android.R.id.pasteAsPlainText) return "paste-as-plain-text";
+        if (id == android.R.id.selectAll) return "select-all";
+        if (id == android.R.id.replaceText) return "replace";
+        if (id == android.R.id.shareText) return "share";
+        if (id == android.R.id.textAssist) return "assist";
+        if (id == android.R.id.autofill) return "autofill";
+        return "other";
+    }
+
+    /** Whether {@code field} hides its text (a password or PIN field); a field that is gone counts as masked. */
+    private static boolean masked(EditText field) {
+        if (field == null) return true;
+        if (field.getTransformationMethod() instanceof android.text.method.PasswordTransformationMethod) return true;
+        int type = field.getInputType();
+        int variation = type & android.text.InputType.TYPE_MASK_VARIATION;
+        int kind = type & android.text.InputType.TYPE_MASK_CLASS;
+        return (kind == android.text.InputType.TYPE_CLASS_TEXT
+                        && (variation == android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+                                || variation == android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                                || variation == android.text.InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD))
+                || (kind == android.text.InputType.TYPE_CLASS_NUMBER
+                        && variation == android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+    }
+
+    /**
+     * Watches an EditText's own floating toolbar by wrapping its custom selection and
+     * insertion callbacks: every call goes on to the callback that was there (none,
+     * in NSH's fields), and with none it answers as Android does without one (keep the
+     * menu, leave the items to the field), so the field behaves exactly as before. It
+     * only records which toolbar shows.
+     */
+    private static final class MenuWatch implements ActionMode.Callback {
+        /** The toolbar showing now, its kind, and the field it is over (weakly). */
+        static volatile ActionMode shown;
+        static volatile String kind;
+        static volatile java.lang.ref.WeakReference<EditText> field;
+
+        private final ActionMode.Callback inner;
+        private final String watched;
+        private final java.lang.ref.WeakReference<EditText> owner;
+
+        private MenuWatch(ActionMode.Callback inner, String watched, EditText owner) {
+            this.inner = inner;
+            this.watched = watched;
+            this.owner = new java.lang.ref.WeakReference<>(owner);
+        }
+
+        static void watch(EditText field) {
+            ActionMode.Callback selection = field.getCustomSelectionActionModeCallback();
+            if (!(selection instanceof MenuWatch)) {
+                field.setCustomSelectionActionModeCallback(new MenuWatch(selection, "selection", field));
+            }
+            if (Build.VERSION.SDK_INT >= 23) {
+                ActionMode.Callback insertion = field.getCustomInsertionActionModeCallback();
+                if (!(insertion instanceof MenuWatch)) {
+                    field.setCustomInsertionActionModeCallback(new MenuWatch(insertion, "insertion", field));
+                }
+            }
+        }
+
+        @Override
+        public boolean onCreateActionMode(ActionMode mode, Menu menu) {
+            boolean keep = inner == null || inner.onCreateActionMode(mode, menu);
+            if (keep) {
+                shown = mode;
+                kind = watched;
+                field = owner;
+            }
+            return keep;
+        }
+
+        @Override
+        public boolean onPrepareActionMode(ActionMode mode, Menu menu) {
+            return inner == null || inner.onPrepareActionMode(mode, menu);
+        }
+
+        @Override
+        public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+            return inner != null && inner.onActionItemClicked(mode, item);
+        }
+
+        @Override
+        public void onDestroyActionMode(ActionMode mode) {
+            if (inner != null) inner.onDestroyActionMode(mode);
+            if (shown == mode) shown = null;
+        }
     }
 
     /**
@@ -409,10 +554,11 @@ public final class AgentBridge {
             boxOverflow = boxClass.getDeclaredField("overflow");
             boxClip = boxClass.getDeclaredField("clip");
             inputEdit = inputBoxClass.getDeclaredField("edit");
+            inputEditMenu = inputBoxClass.getDeclaredField("editMenu");
             testAgentShownDialog = testAgent.getDeclaredField("shownDialog");
             for (AccessibleObject object : new AccessibleObject[] {
                 nshMounter, mounterTopModal, inputShowKeyboard, mounterViews, boxPointerEvents,
-                boxOverflow, boxClip, inputEdit, testAgentShownDialog,
+                boxOverflow, boxClip, inputEdit, inputEditMenu, testAgentShownDialog,
             }) {
                 object.setAccessible(true);
             }

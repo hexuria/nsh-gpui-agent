@@ -3437,6 +3437,27 @@ fn a_hold_within_a_node_refuses_a_point_scrolled_off_the_window() {
 }
 
 #[test]
+fn a_text_menu_is_read_only_from_a_known_kind() {
+    let strings = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+    assert_eq!(
+        TextMenu::from_strings(&strings(&["selection", "cut", "copy", "select-all"])),
+        Some(TextMenu {
+            kind: TextMenu::SELECTION,
+            items: strings(&["cut", "copy", "select-all"]),
+        })
+    );
+    assert_eq!(
+        TextMenu::from_strings(&strings(&["insertion"])).map(|menu| menu.items.len()),
+        Some(0)
+    );
+    assert_eq!(TextMenu::from_strings(&[]), None);
+    assert_eq!(
+        TextMenu::from_strings(&strings(&["paste", "select-all"])),
+        None
+    );
+}
+
+#[test]
 fn selections_from_triples_keeps_whole_asked_triples() {
     let got = selections_from_triples(&[3, 7], &[3, 0, 9, 7, 2, 2]);
     assert_eq!(got.get(&3), Some(&(0, 9)));
