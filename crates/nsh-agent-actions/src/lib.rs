@@ -551,6 +551,28 @@ fn hold_reaches_through_own_input(
         })
 }
 
+/// Whether `keys` (one keystroke in `nsh/keymap` notation, `mod+v`) is a
+/// paste chord on some platform, read as the crate reads every chord
+/// ([`normalize_chord`]: `⌘`, `cmd`, `super`, `windows` are `meta`; `⌃`,
+/// `ctl`, `control` are `ctrl`; `⇧` is `shift`; `insert` is `ins`; any case,
+/// `+` or `-`): V with `meta`, `ctrl` or `mod` (Shift or Alt besides, as
+/// paste-as-plain-text has), Shift+Insert, or a paste key of its own
+/// (Android's `KEYCODE_PASTE`, X11's `XF86Paste`).
+///
+/// Only chords are gated. A desktop field's own context menu reached by a
+/// key sequence (the Menu key, then Paste) is no chord and is not gated; no
+/// recipe drives one.
+pub fn is_paste_chord(keys: &str) -> bool {
+    let parts = normalize_chord(keys);
+    let has = |name: &str| parts.iter().any(|part| part == name);
+    let paste_key = parts
+        .iter()
+        .any(|part| matches!(part.as_str(), "paste" | "xf86paste" | "keycode_paste"));
+    paste_key
+        || (has("v") && (has("meta") || has("ctrl") || has("mod")))
+        || (has("ins") && has("shift"))
+}
+
 /// The platform's own text menu showing over an input, as read from the
 /// platform (read-only: the agent does not press its items).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1254,6 +1276,15 @@ impl Agent {
 
     /// Sends a hardware key chord after verifying the target.
     pub fn key_node(&self, id: NodeId, keys: &str) -> Result<(), String> {
+        // A paste chord pastes the system clipboard, which can hold what a
+        // person or another app copied (codes, passwords, addresses), into a
+        // field read back unmasked into proof: only a clip this run set.
+        if is_paste_chord(keys) && self.native.clipboard_set_by_agent() != Some(true) {
+            return Err(format!(
+                "`{keys}` pastes the system clipboard, which was not set by this run: give the \
+                 text with the paste op instead (it pastes that text, not the clipboard)"
+            ));
+        }
         self.settled()?;
         let node = self
             .scene

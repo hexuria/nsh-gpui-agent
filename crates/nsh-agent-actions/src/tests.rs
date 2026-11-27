@@ -3509,3 +3509,38 @@ fn only_items_that_stay_inside_the_app_are_pressable() {
         assert!(!TextMenu::pressable(word), "{word}");
     }
 }
+
+#[test]
+fn paste_chords_are_known_on_every_platform() {
+    for keys in [
+        "mod+v",
+        "Cmd+V",
+        "ctrl+v",
+        "Control-V",
+        "ctrl+shift+v",
+        "mod+alt+shift+v",
+        "meta+v",
+        "shift+insert",
+        "Shift+Ins",
+        "paste",
+        "XF86Paste",
+        "KEYCODE_PASTE",
+        // The crate's other spellings (normalize_chord).
+        "⌘+v",
+        "⌘-V",
+        "⌃+v",
+        "ctl+v",
+        "windows+v",
+        "super+v",
+        "win+v",
+        "⇧+insert",
+        "⇧+ins",
+    ] {
+        assert!(is_paste_chord(keys), "{keys}");
+    }
+    for keys in [
+        "v", "shift+v", "alt+v", "ctrl+c", "mod+a", "insert", "Tab", "Enter", "", "+",
+    ] {
+        assert!(!is_paste_chord(keys), "{keys}");
+    }
+}
