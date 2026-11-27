@@ -526,6 +526,42 @@ fn hold_reaches_through_own_input(
         })
 }
 
+/// The selections a host's bridge answered as flat `(id, start, end)`
+/// triples for the inputs `asked`. Strict, so a bridge fault never moves
+/// one field's selection onto another: anything but whole triples gives
+/// nothing at all, an id not asked for or answered twice is dropped (both
+/// copies of a duplicate), and so is a triple whose offsets are negative or
+/// whose end is before its start.
+pub fn selections_from_triples(
+    asked: &[NodeId],
+    values: &[i32],
+) -> std::collections::HashMap<NodeId, (u32, u32)> {
+    let mut out = std::collections::HashMap::new();
+    if values.len() % 3 != 0 {
+        return out;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut twice = std::collections::HashSet::new();
+    for triple in values.chunks_exact(3) {
+        let [id, start, end] = [triple[0], triple[1], triple[2]];
+        let Ok(id) = NodeId::try_from(id) else {
+            continue;
+        };
+        if !asked.contains(&id) {
+            continue;
+        }
+        if !seen.insert(id) {
+            twice.insert(id);
+            continue;
+        }
+        if start >= 0 && end >= start {
+            out.insert(id, (start as u32, end as u32));
+        }
+    }
+    out.retain(|id, _| !twice.contains(id));
+    out
+}
+
 /// Acts on a host's app through its [`SemanticScene`] and [`StrictNative`].
 pub struct Agent {
     scene: std::sync::Arc<dyn SemanticScene>,

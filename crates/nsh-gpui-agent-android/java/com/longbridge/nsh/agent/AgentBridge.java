@@ -170,14 +170,20 @@ public final class AgentBridge {
             int[] out = new int[ids.length * 3];
             int n = 0;
             for (int id : ids) {
-                Object view = views.get(id);
-                if (!inputBoxClass.isInstance(view)) continue;
-                EditText edit = (EditText) inputEdit.get(view);
-                int start = edit.getSelectionStart(), end = edit.getSelectionEnd();
-                if (start < 0 || end < 0) continue;
-                out[n++] = id;
-                out[n++] = Math.min(start, end);
-                out[n++] = Math.max(start, end);
+                // One field that cannot be read leaves the others' selections.
+                try {
+                    Object view = views.get(id);
+                    if (!inputBoxClass.isInstance(view)) continue;
+                    EditText edit = (EditText) inputEdit.get(view);
+                    if (edit == null) continue;
+                    int start = edit.getSelectionStart(), end = edit.getSelectionEnd();
+                    if (start < 0 || end < 0) continue;
+                    out[n++] = id;
+                    out[n++] = Math.min(start, end);
+                    out[n++] = Math.max(start, end);
+                } catch (Exception e) {
+                    Log.w("nsh", "test agent: selection of " + id + ": " + e);
+                }
             }
             return java.util.Arrays.copyOf(out, n);
         }, new int[0]);

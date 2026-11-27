@@ -414,8 +414,8 @@ impl StrictNative for AndroidStrictNative {
             .ok_or_else(|| "Android could not change the requested orientation".into())
     }
 
-    fn input_selections(&self, ids: &[NodeId]) -> std::collections::HashMap<NodeId, (u32, u32)> {
-        let ids: Vec<i32> = ids
+    fn input_selections(&self, asked: &[NodeId]) -> std::collections::HashMap<NodeId, (u32, u32)> {
+        let ids: Vec<i32> = asked
             .iter()
             .filter_map(|&id| i32::try_from(id).ok())
             .collect();
@@ -441,15 +441,7 @@ impl StrictNative for AndroidStrictNative {
             env.get_int_array_region(&array, 0, &mut out)?;
             Ok(out)
         });
-        triples
-            .chunks_exact(3)
-            .filter_map(|triple| match *triple {
-                [id, start, end] if id >= 0 && start >= 0 && end >= start => {
-                    Some((id as NodeId, (start as u32, end as u32)))
-                }
-                _ => None,
-            })
-            .collect()
+        nsh_agent_actions::selections_from_triples(asked, &triples)
     }
 
     fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
