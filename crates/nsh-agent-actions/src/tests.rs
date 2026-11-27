@@ -3650,3 +3650,90 @@ fn paste_chords_are_known_on_every_platform() {
         assert!(!is_paste_chord(keys), "{keys}");
     }
 }
+
+/// An agent over a pressable node 2 (60 by 40 at `origin`) in a 100 by 100
+/// window, whose hit test answers `hit`: it, and the points pressed.
+fn within_press_agent(
+    origin: Point<Points>,
+    hit: NodeId,
+) -> (Agent, Arc<Mutex<Vec<Point<Points>>>>) {
+    let pressed_at = Arc::new(Mutex::new(Vec::new()));
+    let nodes = vec![
+        semantic_node(1, None, false, SemanticTarget::View),
+        semantic_node(2, Some(1), true, SemanticTarget::View),
+        semantic_node(3, Some(1), true, SemanticTarget::View),
+    ];
+    let bounds = [
+        (
+            1,
+            Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(100.0))),
+        ),
+        (2, Bounds::new(origin, size(px(60.0), px(40.0)))),
+        (3, Bounds::new(origin, size(px(60.0), px(40.0)))),
+    ];
+    let agent = Agent::requiring_native_hit_test(
+        target_scene(nodes),
+        Box::new(GateNative {
+            windows: None,
+            bounds: bounds.into(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(hit)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pressed_at: pressed_at.clone(),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: Size::new(px(100.0), px(100.0)),
+        }),
+    );
+    (agent, pressed_at)
+}
+
+#[test]
+fn a_press_within_a_node_lands_at_that_point_of_it() {
+    let (agent, pressed_at) = within_press_agent(point(px(20.0), px(10.0)), 2);
+    agent
+        .press_node_within(2, point(px(50.0), px(30.0)))
+        .unwrap();
+    assert_eq!(*pressed_at.lock().unwrap(), vec![point(px(70.0), px(40.0))]);
+}
+
+#[test]
+fn a_press_within_a_node_refuses_a_point_outside_it() {
+    let (agent, pressed_at) = within_press_agent(point(px(20.0), px(10.0)), 2);
+    for within in [
+        point(px(60.0), px(10.0)),
+        point(px(10.0), px(40.0)),
+        point(px(-1.0), px(10.0)),
+        point(px(f32::NAN), px(10.0)),
+    ] {
+        let error = agent.press_node_within(2, within).unwrap_err();
+        assert!(error.contains("outside the node"), "{within:?}: {error}");
+    }
+    assert!(pressed_at.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_press_within_a_node_is_hit_tested_where_it_lands() {
+    // A sibling (3) on top where the point lands occludes it.
+    let (agent, pressed_at) = within_press_agent(point(px(20.0), px(10.0)), 3);
+    let error = agent
+        .press_node_within(2, point(px(50.0), px(30.0)))
+        .unwrap_err();
+    assert!(error.contains("occluded_by: 3"), "{error}");
+    assert!(pressed_at.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_press_within_a_node_refuses_a_point_scrolled_off_the_window() {
+    // The node runs from y 80 to 120 in a 100-point window.
+    let (agent, pressed_at) = within_press_agent(point(px(20.0), px(80.0)), 2);
+    let error = agent
+        .press_node_within(2, point(px(10.0), px(30.0)))
+        .unwrap_err();
+    assert!(error.contains("outside its visible area"), "{error}");
+    agent
+        .press_node_within(2, point(px(10.0), px(10.0)))
+        .unwrap();
+    assert_eq!(*pressed_at.lock().unwrap(), vec![point(px(30.0), px(90.0))]);
+}

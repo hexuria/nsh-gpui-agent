@@ -18,7 +18,9 @@ private_interfaces = "deny"
 [workspace.dependencies]
 nsh-agent-actions = { path = "crates/nsh-agent-actions" }
 nsh-gpui-agent = { path = "crates/nsh-gpui-agent" }
-gpui-agent = "=0.4.0"
+# gpui-agent main at its 0.5.0 release commit until v0.5.0 is on crates.io;
+# then `=0.5.0`.
+gpui-agent = { git = "https://github.com/hexuria/gpui-agent", rev = "fbd385664fba78bb48c443f6d53cb855f2e9559c" }
 anyhow = "1"
 ctor = "1"
 jni = "0.21"

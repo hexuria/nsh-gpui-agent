@@ -51,6 +51,15 @@ pub const TEXT_MENU_ID: &str = "system-text-menu";
 /// ([`SOFTWARE_KEYBOARD_ID`]) and refuses presses on it.
 pub const SOFTWARE_KEYBOARD_FEATURE: &str = "software_keyboard";
 
+/// The `hello.features` entry of a host that aims a press or long press
+/// inside its target (`within`, gpui-agent 0.5.0).
+pub const PRESS_WITHIN_FEATURE: &str = "press_within";
+
+/// A `within` offset as a point in the target's own frame.
+fn within_point(within: &gpui_agent::protocol::PointOffset) -> Point<Points> {
+    Point::new(Points(within.x as f32), Points(within.y as f32))
+}
+
 /// Native Shell host exposed through GPUI-agent.
 #[non_exhaustive]
 pub struct NshAgentHost {
@@ -126,6 +135,17 @@ impl NshAgentHost {
             _ => None,
         };
         if let Some(word) = pressed.and_then(text_menu_item_word) {
+            if matches!(
+                op,
+                Op::Press {
+                    within: Some(_),
+                    ..
+                }
+            ) {
+                return Err(
+                    "`within` does not aim inside the platform's text menu: press the item".into(),
+                );
+            }
             return self
                 .agent
                 .press_text_menu_item(word)
@@ -152,6 +172,18 @@ impl NshAgentHost {
                 .key_node(self.node_id(target)?, key)
                 .map(|()| DispatchResult::empty()),
             Op::Invoke { name, args } => self.invoke(name, args),
+            Op::Press {
+                target,
+                within: Some(within),
+                ..
+            } => {
+                let Some(target) = target else {
+                    return Err("`within` needs a target".into());
+                };
+                self.agent
+                    .press_node_within(self.node_id(target)?, within_point(within))
+                    .map(|()| DispatchResult::empty())
+            }
             Op::Press { .. }
             | Op::Scroll { .. }
             | Op::Hover { .. }
@@ -164,6 +196,7 @@ impl NshAgentHost {
                         target: target.clone(),
                         x: *x,
                         y: *y,
+                        within: None,
                         expect_fingerprint: None,
                     },
                     other => other.clone(),
@@ -177,12 +210,22 @@ impl NshAgentHost {
                 target,
                 x,
                 y,
+                within,
                 duration_ms,
+                ..
             } => {
                 let hold = duration_ms.map(|ms| std::time::Duration::from_millis(ms.min(10_000)));
                 match (target, x, y) {
-                    (Some(target), _, _) => {
-                        self.agent.long_press_node(self.node_id(target)?, hold)?
+                    (Some(target), _, _) => match within {
+                        Some(within) => self.agent.long_press_node_within(
+                            self.node_id(target)?,
+                            within_point(within),
+                            hold,
+                        )?,
+                        None => self.agent.long_press_node(self.node_id(target)?, hold)?,
+                    },
+                    (None, _, _) if within.is_some() => {
+                        return Err("`within` needs a target".into());
                     }
                     (None, Some(x), Some(y)) => self
                         .agent
@@ -441,6 +484,12 @@ impl NshAgentHost {
                 ]);
             }
         }
+        // Every platform aims inside a target (`within`) and answers state
+        // assertions: gpui-agent's own assert matches `UiNode.states`.
+        names.extend([
+            PRESS_WITHIN_FEATURE,
+            gpui_agent::protocol::ASSERT_STATES_FEATURE,
+        ]);
         names.iter().map(|name| (*name).to_string()).collect()
     }
 
@@ -1866,6 +1915,7 @@ mod tests {
                     target: Some(target.into()),
                     x: None,
                     y: None,
+                    within: None,
                     expect_fingerprint: None,
                 })
                 .unwrap_err();
@@ -2216,6 +2266,7 @@ mod tests {
             target: Some("visible".into()),
             x: None,
             y: None,
+            within: None,
             expect_fingerprint: None,
         })
         .unwrap();
@@ -2224,6 +2275,75 @@ mod tests {
             *presses.lock().unwrap(),
             vec![Point::new(Points(10.0), Points(10.0))]
         );
+    }
+
+    /// A host over the sample tree whose `visible` (node 3, 10 by 10 at
+    /// (5, 5)) is pressable: it, and the points pressed.
+    fn pressable_visible_host() -> (NshAgentHost, Arc<std::sync::Mutex<Vec<Point<Points>>>>) {
+        let mut nodes = sample_nodes();
+        let visible = nodes.iter_mut().find(|node| node.id == 3).unwrap();
+        visible.enabled = true;
+        visible.pressable = true;
+        let presses = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut native = SnapshotNative::new(true, None, false);
+        native.presses = presses.clone();
+        let host =
+            snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);
+        (host, presses)
+    }
+
+    fn press_within(target: Option<&str>, x: f64, y: f64) -> Op {
+        Op::Press {
+            target: target.map(Into::into),
+            x: None,
+            y: None,
+            within: Some(gpui_agent::protocol::PointOffset { x, y }),
+            expect_fingerprint: None,
+        }
+    }
+
+    #[test]
+    fn a_press_within_its_target_lands_at_that_point_of_it() {
+        let (mut host, presses) = pressable_visible_host();
+        host.dispatch(&press_within(Some("visible"), 2.0, 3.0))
+            .unwrap();
+        assert_eq!(
+            *presses.lock().unwrap(),
+            vec![Point::new(Points(7.0), Points(8.0))]
+        );
+    }
+
+    #[test]
+    fn a_press_within_refuses_a_point_outside_its_target_or_no_target() {
+        let (mut host, presses) = pressable_visible_host();
+        let error = host
+            .dispatch(&press_within(Some("visible"), 10.0, 3.0))
+            .unwrap_err();
+        assert!(error.contains("outside the node"), "{error}");
+        let error = host.dispatch(&press_within(None, 2.0, 3.0)).unwrap_err();
+        assert!(error.contains("needs a target"), "{error}");
+        assert!(presses.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn hello_lists_press_within_and_assert_states_on_every_platform() {
+        for platform in [
+            PlatformKind::Desktop,
+            PlatformKind::Mobile,
+            PlatformKind::Web,
+        ] {
+            let agent = Arc::new(Agent::requiring_native_hit_test(
+                Arc::new(SnapshotScene(Ok(sample_nodes()), 1, Default::default())),
+                Box::new(SnapshotNative::new(true, None, false)),
+            ));
+            let hello = NshAgentHost::new("test", platform, agent).unwrap().hello();
+            for feature in ["press_within", "assert_states"] {
+                assert!(
+                    hello.features.iter().any(|name| name == feature),
+                    "{platform:?}: {feature}"
+                );
+            }
+        }
     }
 
     #[test]

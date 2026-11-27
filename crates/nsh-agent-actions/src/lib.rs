@@ -457,6 +457,32 @@ fn normalize_chord(chord: &str) -> Vec<String> {
     parts
 }
 
+/// The window point `within` names in a node whose native frame is
+/// `bounds`: `within` is from the frame's top-left corner, in points, and
+/// must fall inside the frame.
+fn point_within(
+    bounds: Bounds<Points>,
+    within: Point<Points>,
+    selector: &str,
+) -> Result<Point<Points>, String> {
+    if !within.x.0.is_finite()
+        || !within.y.0.is_finite()
+        || within.x.0 < 0.0
+        || within.y.0 < 0.0
+        || within.x.0 >= bounds.size.width.0
+        || within.y.0 >= bounds.size.height.0
+    {
+        return Err(format!(
+            "`{selector}`: ({}, {}) is outside the node ({} by {} points)",
+            within.x.0, within.y.0, bounds.size.width.0, bounds.size.height.0
+        ));
+    }
+    Ok(Point::new(
+        Points(bounds.origin.x.0 + within.x.0),
+        Points(bounds.origin.y.0 + within.y.0),
+    ))
+}
+
 /// What a press on `target` goes to: itself when it is an input or
 /// pressable, else its nearest pressable ancestor (`None`: nothing takes it).
 fn press_owner(nodes: &[SemanticNode], target: &SemanticNode) -> Option<NodeId> {
@@ -972,6 +998,41 @@ impl Agent {
         self.settled()
     }
 
+    /// Clicks semantic node `id` at `within`, a point in the node's own
+    /// frame (from its top-left corner, in points): one cell of a row of
+    /// cells that is one node. The point must be inside the part of the
+    /// node on screen, and the press passes the same actionability check
+    /// as [`Agent::press_node`] there; it is never moved.
+    pub fn press_node_within(&self, id: NodeId, within: Point<Points>) -> Result<(), String> {
+        self.settled_and_keyboard()?;
+        let selector = format!("node {id}");
+        let nodes = self.scene.semantic_tree()?;
+        let target = nodes
+            .iter()
+            .find(|node| node.id == id)
+            .ok_or_else(|| format!("`{selector}` is offscreen (node unavailable)"))?;
+        if !target.enabled {
+            return Err(format!("`{selector}` is disabled"));
+        }
+        let owner =
+            press_owner(&nodes, target).ok_or_else(|| format!("`{selector}` is not pressable"))?;
+        let geometry = self
+            .target_geometry(target)
+            .ok_or_else(|| format!("`{selector}` is offscreen (no native bounds)"))?;
+        let at = point_within(geometry.bounds, within, &selector)?;
+        let at = self.actionable_point_with_press_owner(
+            id,
+            geometry.owner,
+            at,
+            &selector,
+            Some(owner),
+            true,
+            false,
+        )?;
+        self.native.press(at);
+        self.settled()
+    }
+
     /// Presses and holds semantic node `id`, after long-press actionability is
     /// established.
     pub fn long_press_node(&self, id: NodeId, hold: Option<Duration>) -> Result<(), String> {
@@ -1017,21 +1078,7 @@ impl Agent {
         let geometry = self
             .target_geometry(node)
             .ok_or_else(|| format!("`{selector}` is offscreen (no native bounds)"))?;
-        let bounds = geometry.bounds;
-        if within.x.0 < 0.0
-            || within.y.0 < 0.0
-            || within.x.0 >= bounds.size.width.0
-            || within.y.0 >= bounds.size.height.0
-        {
-            return Err(format!(
-                "`{selector}`: ({}, {}) is outside the node ({} by {} points)",
-                within.x.0, within.y.0, bounds.size.width.0, bounds.size.height.0
-            ));
-        }
-        let at = Point::new(
-            Points(bounds.origin.x.0 + within.x.0),
-            Points(bounds.origin.y.0 + within.y.0),
-        );
+        let at = point_within(geometry.bounds, within, selector)?;
         let at = self.actionable_point_with_press_owner(
             id,
             geometry.owner,
