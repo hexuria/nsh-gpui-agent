@@ -3435,3 +3435,24 @@ fn a_hold_within_a_node_refuses_a_point_scrolled_off_the_window() {
         vec![(point(px(30.0), px(70.0)), Duration::from_millis(600))]
     );
 }
+
+#[test]
+fn a_text_menu_is_read_only_from_a_known_kind() {
+    let strings = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+    assert_eq!(
+        TextMenu::from_strings(&strings(&["selection", "Cut", "Copy", "Select all"])),
+        Some(TextMenu {
+            kind: TextMenu::SELECTION,
+            items: strings(&["Cut", "Copy", "Select all"]),
+        })
+    );
+    assert_eq!(
+        TextMenu::from_strings(&strings(&["insertion"])).map(|menu| menu.items.len()),
+        Some(0)
+    );
+    assert_eq!(TextMenu::from_strings(&[]), None);
+    assert_eq!(
+        TextMenu::from_strings(&strings(&["Paste", "Select all"])),
+        None
+    );
+}

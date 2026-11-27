@@ -32,6 +32,13 @@ use nsh_core::{
 /// keyboard and `wait_until system-keyboard --absent` for it to go.
 pub const SOFTWARE_KEYBOARD_ID: &str = "system-keyboard";
 
+/// The id of the node a snapshot ends with while the platform's own text
+/// menu shows over an input (Android's floating toolbar): role `menu`, its
+/// kind a state (`selection`, `insertion`, `edit`), its visible items
+/// children of role `menuitem`, all `system` and taking no action. Absent
+/// while no such menu shows.
+pub const TEXT_MENU_ID: &str = "system-text-menu";
+
 /// The `hello.features` entry of a host that reports the software keyboard
 /// ([`SOFTWARE_KEYBOARD_ID`]) and refuses presses on it.
 pub const SOFTWARE_KEYBOARD_FEATURE: &str = "software_keyboard";
@@ -271,6 +278,9 @@ impl AgentHost for NshAgentHost {
             .collect();
         if let Ok(Some(frame)) = keyboard {
             roots.push(keyboard_node(frame));
+        }
+        if let Some(menu) = self.agent.native_text_menu() {
+            roots.push(text_menu_node(&menu));
         }
         // A resize or a failed call while the nodes were read.
         if !self.agent.native_available()
@@ -697,6 +707,28 @@ impl<'a> SnapshotIndex<'a> {
             viewport: agent.native_viewport(),
         }
     }
+}
+
+/// The snapshot's node for the platform's text menu ([`TEXT_MENU_ID`]):
+/// not one of the app's views, so it and its items take no action. Its
+/// bounds stay zero: the platform does not say where it floats.
+fn text_menu_node(menu: &nsh_agent_actions::TextMenu) -> UiNode {
+    let mut node = UiNode::new(TEXT_MENU_ID, "menu", "Text menu");
+    node.enabled = false;
+    node.states
+        .extend(["system".to_owned(), menu.kind.to_owned()]);
+    node.children = menu
+        .items
+        .iter()
+        .enumerate()
+        .map(|(n, title)| {
+            let mut item = UiNode::new(format!("{TEXT_MENU_ID}-{}", n + 1), "menuitem", title);
+            item.enabled = false;
+            item.states.push("system".into());
+            item
+        })
+        .collect();
+    node
 }
 
 /// The snapshot's node for the software keyboard showing at `frame`: not
@@ -1360,6 +1392,8 @@ mod tests {
         presses: Arc<std::sync::Mutex<Vec<Point<Points>>>>,
         drags: DragRecords,
         keyboard: Result<Option<Bounds<Points>>, String>,
+        /// The platform's text menu showing.
+        text_menu: Option<nsh_agent_actions::TextMenu>,
     }
 
     impl SnapshotNative {
@@ -1372,6 +1406,7 @@ mod tests {
                 presses: Arc::default(),
                 drags: Arc::default(),
                 keyboard: Ok(None),
+                text_menu: None,
             }
         }
     }
@@ -1395,6 +1430,10 @@ mod tests {
 
         fn hit_at(&self, _: Point<Points>) -> Result<Option<NodeId>, String> {
             Ok(self.hit)
+        }
+
+        fn text_menu(&self) -> Option<nsh_agent_actions::TextMenu> {
+            self.text_menu.clone()
         }
     }
 
@@ -1567,6 +1606,42 @@ mod tests {
             } else {
                 assert_eq!(input.value.as_deref(), Some(secret));
             }
+        }
+    }
+
+    #[test]
+    fn snapshot_ends_with_the_platforms_text_menu_while_it_shows() {
+        for menu in [
+            None,
+            nsh_agent_actions::TextMenu::from_strings(&[
+                "insertion".into(),
+                "Paste".into(),
+                "Select all".into(),
+            ]),
+        ] {
+            let mut native = SnapshotNative::new(true, None, false);
+            native.text_menu = menu.clone();
+            let host = snapshot_host_with_native(
+                SnapshotScene(Ok(sample_nodes()), 1, Default::default()),
+                native,
+            );
+            let snapshot = host.snapshot();
+            let found = snapshot.nodes.iter().find(|node| node.id == TEXT_MENU_ID);
+            let Some(menu) = menu else {
+                assert!(found.is_none());
+                continue;
+            };
+            let node = found.expect("the text menu's node");
+            assert_eq!(node.role, "menu");
+            assert!(!node.enabled);
+            assert!(node.states.iter().any(|state| state == "system"));
+            assert!(node.states.iter().any(|state| state == menu.kind));
+            let items: Vec<(&str, bool)> = node
+                .children
+                .iter()
+                .map(|item| (item.name.as_str(), item.enabled))
+                .collect();
+            assert_eq!(items, [("Paste", false), ("Select all", false)]);
         }
     }
 
