@@ -307,12 +307,16 @@ pub trait StrictNative: Native {
     fn take_failure(&self) -> Option<String> {
         None
     }
-    /// Where input `id`'s selection is as the platform holds it: its
-    /// start and end in UTF-16 code units, start first (equal for a bare
-    /// caret). `None` when the platform does not say, or `id` is no input.
-    fn input_selection(&self, id: NodeId) -> Option<(u32, u32)> {
-        let _ = id;
-        None
+    /// The selections of inputs `ids` as the platform holds them, read in
+    /// one go (a snapshot asks for every input at once, so a host whose
+    /// views live on another thread pays one hop, not one per field). Each
+    /// is its start and end in UTF-16 code units, start first: the
+    /// direction a selection was made in is dropped, and a bare caret has
+    /// equal ends. An input the platform says nothing of (or an id that is
+    /// no input) is left out; the default says nothing of any.
+    fn input_selections(&self, ids: &[NodeId]) -> std::collections::HashMap<NodeId, (u32, u32)> {
+        let _ = ids;
+        std::collections::HashMap::new()
     }
 }
 
@@ -669,10 +673,13 @@ impl Agent {
         self.native.input_text(id)
     }
 
-    /// Input `id`'s selection as the platform holds it
-    /// ([`StrictNative::input_selection`]).
-    pub fn native_input_selection(&self, id: NodeId) -> Option<(u32, u32)> {
-        self.native.input_selection(id)
+    /// The selections of inputs `ids` as the platform holds them
+    /// ([`StrictNative::input_selections`]).
+    pub fn native_input_selections(
+        &self,
+        ids: &[NodeId],
+    ) -> std::collections::HashMap<NodeId, (u32, u32)> {
+        self.native.input_selections(ids)
     }
 
     fn target_geometry(&self, node: &SemanticNode) -> Option<TargetGeometry> {

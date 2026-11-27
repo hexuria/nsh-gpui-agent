@@ -414,30 +414,42 @@ impl StrictNative for AndroidStrictNative {
             .ok_or_else(|| "Android could not change the requested orientation".into())
     }
 
-    fn input_selection(&self, id: NodeId) -> Option<(u32, u32)> {
-        let id = i32::try_from(id).ok()?;
-        let selection: Option<Vec<i32>> = self.call(|env, class, view| {
+    fn input_selections(&self, ids: &[NodeId]) -> std::collections::HashMap<NodeId, (u32, u32)> {
+        let ids: Vec<i32> = ids
+            .iter()
+            .filter_map(|&id| i32::try_from(id).ok())
+            .collect();
+        // One main-thread hop for every input of the snapshot: the bridge
+        // answers (id, start, end) triples for those with a selection.
+        let triples: Vec<i32> = self.call(|env, class, view| {
+            let wanted = env.new_int_array(ids.len() as i32)?;
+            env.set_int_array_region(&wanted, 0, &ids)?;
             let array = env
                 .call_static_method(
                     class,
-                    "inputSelection",
-                    "(Landroid/view/View;I)[I",
-                    &[JValue::Object(view), JValue::Int(id)],
+                    "inputSelections",
+                    "(Landroid/view/View;[I)[I",
+                    &[JValue::Object(view), JValue::Object(&wanted)],
                 )?
                 .l()?;
             if array.is_null() {
-                return Ok(None);
+                return Ok(Vec::new());
             }
             let array = JIntArray::from(array);
             let len = env.get_array_length(&array)? as usize;
             let mut out = vec![0; len];
             env.get_int_array_region(&array, 0, &mut out)?;
-            Ok(Some(out))
+            Ok(out)
         });
-        match selection?.as_slice() {
-            &[start, end] if start >= 0 && end >= start => Some((start as u32, end as u32)),
-            _ => None,
-        }
+        triples
+            .chunks_exact(3)
+            .filter_map(|triple| match *triple {
+                [id, start, end] if id >= 0 && start >= 0 && end >= start => {
+                    Some((id as NodeId, (start as u32, end as u32)))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
