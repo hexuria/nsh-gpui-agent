@@ -3544,3 +3544,27 @@ fn paste_chords_are_known_on_every_platform() {
         assert!(!is_paste_chord(keys), "{keys}");
     }
 }
+
+#[test]
+fn copy_chords_are_known_on_every_platform() {
+    for keys in [
+        "mod+c",
+        "Cmd+C",
+        "⌘+x",
+        "ctrl+x",
+        "ctl+c",
+        "ctrl+insert",
+        "shift+delete",
+        "shift+del",
+        "copy",
+        "XF86Cut",
+        "KEYCODE_COPY",
+    ] {
+        assert!(is_copy_chord(keys), "{keys}");
+    }
+    for keys in [
+        "c", "x", "shift+c", "alt+x", "mod+v", "insert", "delete", "Tab", "",
+    ] {
+        assert!(!is_copy_chord(keys), "{keys}");
+    }
+}

@@ -332,6 +332,17 @@ pub trait StrictNative: Native {
         None
     }
 
+    /// A count the platform's clipboard moves on at every write, by anyone
+    /// (macOS and iOS: the pasteboard's `changeCount`; Windows:
+    /// `GetClipboardSequenceNumber`): `None` when the platform has none.
+    /// With it, a platform whose agent never writes the clipboard itself
+    /// still knows a clip as this run's: the one a copy or cut chord the
+    /// agent pressed wrote, as long as nothing wrote after it
+    /// ([`Agent::clipboard_owned`]).
+    fn clipboard_generation(&self) -> Option<u64> {
+        None
+    }
+
     /// The selections of inputs `ids` as the platform holds them, read in
     /// one go (a snapshot asks for every input at once, so a host whose
     /// views live on another thread pays one hop, not one per field). Each
@@ -573,6 +584,24 @@ pub fn is_paste_chord(keys: &str) -> bool {
         || (has("ins") && has("shift"))
 }
 
+/// Whether `keys` is a copy or cut chord on some platform, read as
+/// [`is_paste_chord`] reads chords: C or X with `meta`, `ctrl` or `mod`,
+/// Ctrl+Insert (copy), Shift+Delete (cut), or a copy or cut key of its own.
+pub fn is_copy_chord(keys: &str) -> bool {
+    let parts = normalize_chord(keys);
+    let has = |name: &str| parts.iter().any(|part| part == name);
+    let own_key = parts.iter().any(|part| {
+        matches!(
+            part.as_str(),
+            "copy" | "cut" | "xf86copy" | "xf86cut" | "keycode_copy" | "keycode_cut"
+        )
+    });
+    own_key
+        || ((has("c") || has("x")) && (has("meta") || has("ctrl") || has("mod")))
+        || (has("ins") && has("ctrl"))
+        || (has("delete") && has("shift"))
+}
+
 /// The platform's own text menu showing over an input, as read from the
 /// platform (read-only: the agent does not press its items).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -675,6 +704,9 @@ pub struct Agent {
     native: Box<dyn StrictNative>,
     require_hit_test: bool,
     keyboard: std::sync::Mutex<KeyboardTrack>,
+    /// The clipboard generation a copy or cut chord this agent pressed
+    /// wrote ([`StrictNative::clipboard_generation`]).
+    agent_clip: std::sync::Mutex<Option<u64>>,
 }
 
 /// How long the software keyboard's frame must stay the same before it
@@ -734,6 +766,7 @@ impl Agent {
             native,
             require_hit_test: false,
             keyboard: std::sync::Mutex::default(),
+            agent_clip: std::sync::Mutex::default(),
         }
     }
 
@@ -747,6 +780,7 @@ impl Agent {
             native,
             require_hit_test: true,
             keyboard: std::sync::Mutex::default(),
+            agent_clip: std::sync::Mutex::default(),
         }
     }
 
@@ -849,7 +883,7 @@ impl Agent {
         // The device's clipboard holds whatever a person or another app
         // copied (codes, passwords, addresses), and a pasted field is read
         // back unmasked into proof: only a clip this run set is pasted.
-        if word == "paste" && self.native.clipboard_set_by_agent() != Some(true) {
+        if word == "paste" && self.clipboard_owned() != Some(true) {
             return Err(
                 "the clipboard was not set by this run: Paste would put in what a person or \
                  another app copied (cut or copy through the text menu first)"
@@ -1279,7 +1313,7 @@ impl Agent {
         // A paste chord pastes the system clipboard, which can hold what a
         // person or another app copied (codes, passwords, addresses), into a
         // field read back unmasked into proof: only a clip this run set.
-        if is_paste_chord(keys) && self.native.clipboard_set_by_agent() != Some(true) {
+        if is_paste_chord(keys) && self.clipboard_owned() != Some(true) {
             return Err(format!(
                 "`{keys}` pastes the system clipboard, which was not set by this run: give the \
                  text with the paste op instead (it pastes that text, not the clipboard)"
@@ -1307,8 +1341,42 @@ impl Agent {
                 }
             }
         }
+        // A copy or cut this agent presses makes the clip it writes this
+        // run's: the generation it moved the clipboard to, if it moved it
+        // (with nothing selected it writes nothing, and a clip already
+        // there stays another's).
+        let copying = is_copy_chord(keys);
+        let before = copying
+            .then(|| self.native.clipboard_generation())
+            .flatten();
         self.native.press_keys(keys)?;
+        if copying
+            && let (Some(before), Some(after)) = (before, self.native.clipboard_generation())
+            && after != before
+        {
+            *self
+                .agent_clip
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(after);
+        }
         self.settled()
+    }
+
+    /// Whether the clipboard holds a clip this run set: the platform's own
+    /// answer ([`StrictNative::clipboard_set_by_agent`]) when it has one,
+    /// else whether the clipboard's generation is still the one a copy or
+    /// cut chord this agent pressed wrote ([`StrictNative::clipboard_generation`]).
+    /// `None` when the platform can tell neither.
+    pub fn clipboard_owned(&self) -> Option<bool> {
+        if let Some(owned) = self.native.clipboard_set_by_agent() {
+            return Some(owned);
+        }
+        let now = self.native.clipboard_generation()?;
+        let mine = *self
+            .agent_clip
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Some(mine == Some(now))
     }
 
     /// Returns the app's current keymap and visible menu shortcuts.

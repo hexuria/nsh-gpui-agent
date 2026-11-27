@@ -1484,6 +1484,12 @@ mod tests {
         menu_presses: Arc<std::sync::Mutex<Vec<String>>>,
         /// Whether the clipboard holds a clip the agent set.
         agent_clip: Option<bool>,
+        /// The clipboard's generation, when the platform has one; a copy
+        /// chord the agent presses moves it when `copies` is set.
+        generation: Option<Arc<std::sync::atomic::AtomicU64>>,
+        copies: bool,
+        /// The keystrokes pressed.
+        keys: Arc<std::sync::Mutex<Vec<String>>>,
         /// Input 3's selection, as the platform holds it.
         selection: Option<(u32, u32)>,
         /// How many times the selections were read.
@@ -1503,6 +1509,9 @@ mod tests {
                 text_menu: None,
                 menu_presses: Arc::default(),
                 agent_clip: None,
+                generation: None,
+                copies: true,
+                keys: Arc::default(),
                 selection: None,
                 selection_reads: Arc::default(),
             }
@@ -1543,6 +1552,12 @@ mod tests {
             self.agent_clip
         }
 
+        fn clipboard_generation(&self) -> Option<u64> {
+            self.generation
+                .as_ref()
+                .map(|g| g.load(std::sync::atomic::Ordering::SeqCst))
+        }
+
         fn input_selections(&self, ids: &[NodeId]) -> HashMap<NodeId, (u32, u32)> {
             self.selection_reads
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1554,6 +1569,17 @@ mod tests {
     }
 
     impl Native for SnapshotNative {
+        fn press_keys(&self, keys: &str) -> Result<(), String> {
+            self.keys.lock().unwrap().push(keys.to_owned());
+            if self.copies
+                && nsh_agent_actions::is_copy_chord(keys)
+                && let Some(generation) = &self.generation
+            {
+                generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }
+
         fn bounds(&self, id: NodeId) -> Option<nsh_core::geometry::Bounds<Points>> {
             let (x, y, width, height) = match id {
                 1 => (0.0, 0.0, 100.0, 100.0),
@@ -1896,6 +1922,67 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A host whose field `visible` (node 3) takes keys, with a clipboard
+    /// generation that starts at 5: its pressed keys, and the generation.
+    fn generation_host(
+        copies: bool,
+    ) -> (
+        NshAgentHost,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        let mut nodes = sample_nodes();
+        nodes[2].role = "textbox".into();
+        nodes[2].input = true;
+        nodes[2].enabled = true;
+        let generation = Arc::new(std::sync::atomic::AtomicU64::new(5));
+        let mut native = SnapshotNative::new(true, Some(String::new()), false);
+        native.generation = Some(generation.clone());
+        native.copies = copies;
+        let keys = native.keys.clone();
+        let host =
+            snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);
+        (host, keys, generation)
+    }
+
+    #[test]
+    fn a_paste_chord_after_this_runs_copy_pastes() {
+        let (mut host, keys, _) = generation_host(true);
+        host.dispatch(&Op::key("visible", "mod+c")).unwrap();
+        host.dispatch(&Op::key("visible", "mod+v")).unwrap();
+        assert_eq!(*keys.lock().unwrap(), ["mod+c", "mod+v"]);
+    }
+
+    #[test]
+    fn a_paste_chord_without_this_runs_copy_is_refused() {
+        // A clip already on the clipboard (generation 5) is another's.
+        let (mut host, keys, _) = generation_host(true);
+        let reply = format!("{:?}", host.dispatch(&Op::key("visible", "mod+v")));
+        assert!(reply.contains("pastes the system clipboard"), "{reply}");
+        assert!(keys.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_write_after_this_runs_copy_makes_the_clip_anothers() {
+        let (mut host, keys, generation) = generation_host(true);
+        host.dispatch(&Op::key("visible", "mod+c")).unwrap();
+        // A person or another app copies something meanwhile.
+        generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let reply = format!("{:?}", host.dispatch(&Op::key("visible", "ctrl+v")));
+        assert!(reply.contains("pastes the system clipboard"), "{reply}");
+        assert_eq!(*keys.lock().unwrap(), ["mod+c"]);
+    }
+
+    #[test]
+    fn a_copy_that_wrote_nothing_leaves_the_clip_anothers() {
+        // Nothing selected: the copy moves no generation.
+        let (mut host, keys, _) = generation_host(false);
+        host.dispatch(&Op::key("visible", "mod+c")).unwrap();
+        let reply = format!("{:?}", host.dispatch(&Op::key("visible", "mod+v")));
+        assert!(reply.contains("pastes the system clipboard"), "{reply}");
+        assert_eq!(*keys.lock().unwrap(), ["mod+c"]);
     }
 
     #[test]
