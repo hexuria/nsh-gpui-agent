@@ -1146,7 +1146,22 @@ impl Agent {
         let error = match self.node_point(id) {
             Ok(at) => {
                 self.native.press(at);
-                return Ok(());
+                // The press is not the focus yet: a platform can hand the
+                // keys that follow to the input faster than it delivers
+                // the press (macOS posts mouse events to the app's queue
+                // but sends key events synchronously), and then the keys
+                // land in whatever still holds the focus
+                // (hexuria/nsh-gpui-agent#14). The keys wait until the
+                // input provably has the focus, as the overlay path below
+                // already required.
+                self.settled()?;
+                if self.native.focused() == Some(id) {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "a press at ({}, {}) did not give node {id} the focus",
+                    at.x.0, at.y.0
+                ));
             }
             Err(error) => error,
         };

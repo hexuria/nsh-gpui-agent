@@ -192,6 +192,9 @@ impl Native for GateNative {
         self.pressed_at.lock().unwrap().push(at);
         if let Some(id) = GATE_FOCUS_ON_PRESS.with(std::cell::Cell::get) {
             GATE_FOCUSED.with(|focused| focused.set(Some(id)));
+        } else if let Ok(Some(hit)) = self.hit_node(at) {
+            // As a platform's press does: what it hits takes the focus.
+            GATE_FOCUSED.with(|focused| focused.set(Some(hit)));
         }
     }
     fn long_press(&self, at: Point<Points>, hold: Duration) {
@@ -264,12 +267,10 @@ thread_local! {
     static GATE_FOCUS_ON_PRESS: std::cell::Cell<Option<NodeId>> = const { std::cell::Cell::new(None) };
 }
 
-impl StrictNative for GateNative {
-    fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
-        Ok(GATE_KEYBOARD.with(std::cell::Cell::get))
-    }
-    fn hit_at(&self, at: Point<Points>) -> Result<Option<NodeId>, String> {
-        self.hits.lock().unwrap().push(at);
+impl GateNative {
+    /// The hit `hit_at` reports, without recording it (a press reads where
+    /// it fell for the focus it gives; the press itself is the action).
+    fn hit_node(&self, at: Point<Points>) -> Result<Option<NodeId>, String> {
         if let Some(windows) = &self.windows {
             let selected = *windows.selected.lock().unwrap();
             return Ok(self
@@ -282,6 +283,16 @@ impl StrictNative for GateNative {
                 .max());
         }
         self.hit.clone()
+    }
+}
+
+impl StrictNative for GateNative {
+    fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
+        Ok(GATE_KEYBOARD.with(std::cell::Cell::get))
+    }
+    fn hit_at(&self, at: Point<Points>) -> Result<Option<NodeId>, String> {
+        self.hits.lock().unwrap().push(at);
+        self.hit_node(at)
     }
     fn focus_node(&self, _: NodeId) -> Result<(), String> {
         if self.windows.is_none() {
@@ -305,7 +316,8 @@ struct SystemActionRecords {
 struct SystemActionNative {
     bounds: std::collections::HashMap<NodeId, Bounds<Points>>,
     viewport: Size<Points>,
-    focused: Option<NodeId>,
+    focused: Mutex<Option<NodeId>>,
+    press_focuses: bool,
     records: Arc<SystemActionRecords>,
     rotate_error: Option<&'static str>,
     keyboard_error: Option<&'static str>,
@@ -321,6 +333,11 @@ impl Native for SystemActionNative {
     fn press(&self, at: Point<Points>) {
         self.records.calls.lock().unwrap().push("press");
         self.records.presses.lock().unwrap().push(at);
+        if self.press_focuses
+            && let Some((id, _)) = self.bounds.iter().find(|(_, bounds)| bounds.contains(&at))
+        {
+            *self.focused.lock().unwrap() = Some(*id);
+        }
     }
     fn long_press(&self, _: Point<Points>, _: Duration) {}
     fn scroll(&self, _: Point<Points>, _: Point<Points>) {}
@@ -338,7 +355,7 @@ impl Native for SystemActionNative {
         None
     }
     fn focused(&self) -> Option<NodeId> {
-        self.focused
+        *self.focused.lock().unwrap()
     }
     fn paste(&self, content: &nsh_core::PasteEvent) -> Result<(), String> {
         self.records.calls.lock().unwrap().push("paste");
@@ -445,6 +462,19 @@ fn system_action_agent(
     rotate_error: Option<&'static str>,
     keyboard_error: Option<&'static str>,
 ) -> (Agent, Arc<SystemActionRecords>) {
+    system_action_agent_with(input, focused, rotate_error, keyboard_error, true)
+}
+
+/// [`system_action_agent`]; `press_focuses` says whether a press inside the
+/// input gives it the focus, as a platform's does when its events are
+/// delivered in order.
+fn system_action_agent_with(
+    input: bool,
+    focused: Option<NodeId>,
+    rotate_error: Option<&'static str>,
+    keyboard_error: Option<&'static str>,
+    press_focuses: bool,
+) -> (Agent, Arc<SystemActionRecords>) {
     use nsh_core::{EventMask, InputConfig, MountItem, ViewKind, ViewProps};
 
     let model = Arc::new(Model::default());
@@ -488,7 +518,8 @@ fn system_action_agent(
     let native = SystemActionNative {
         bounds: [(2, frame)].into(),
         viewport: size(px(100.0), px(100.0)),
-        focused,
+        focused: Mutex::new(focused),
+        press_focuses,
         records: records.clone(),
         rotate_error,
         keyboard_error,
@@ -556,6 +587,20 @@ fn type_node_focuses_an_unfocused_input_before_typing() {
         *records.typed_text.lock().unwrap(),
         vec!["typed text".to_string()]
     );
+}
+
+#[test]
+fn type_node_does_not_type_when_the_press_did_not_focus_the_input() {
+    // nsh-gpui-agent#14: a platform can deliver keys before the press that
+    // was meant to focus the input (macOS posts mouse events to the queue
+    // but sends keys synchronously), so the keys would land in whatever
+    // still holds the focus. `type` must prove the input is focused after
+    // its press and before the keys, or say it cannot.
+    let (agent, records) = system_action_agent_with(true, None, None, None, false);
+
+    assert!(agent.type_node(2, "typed text").is_err());
+
+    assert!(records.typed_text.lock().unwrap().is_empty());
 }
 
 #[test]
