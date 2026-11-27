@@ -414,6 +414,23 @@ impl StrictNative for AndroidStrictNative {
             .ok_or_else(|| "Android could not change the requested orientation".into())
     }
 
+    fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
+        let frame = self
+            .floats("keyboardFrame")
+            .ok_or_else(|| "Android cannot tell where the keyboard is".to_string())?;
+        match frame.as_slice() {
+            [] => Ok(None),
+            [x, y, w, h] => Ok(Some(Bounds::new(
+                Point::new(Points(x / self.density), Points(y / self.density)),
+                Size::new(Points(w / self.density), Points(h / self.density)),
+            ))),
+            other => Err(format!(
+                "Android keyboard frame has {} numbers, not 4",
+                other.len()
+            )),
+        }
+    }
+
     fn keyboard(&self, shown: bool) -> Result<(), String> {
         let done = self.call(|env, class, view| {
             env.call_static_method(

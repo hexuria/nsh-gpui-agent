@@ -35,7 +35,7 @@ ctrlc = { version = "3.5", features = ["termination"] }
 libc = "0.2"
 nsh-cli = { git = "https://github.com/hexuria/nsh", rev = "365864ba8a3e56189f9a4fcdaf1c874313fc028e" }
 objc2 = "0.6.5"
-objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["std", "UIApplication", "UIResponder", "UIView", "UIWindow"] }
+objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "UIApplication", "UIGeometry", "UIKeyboardLayoutGuide", "UILayoutGuide", "UIResponder", "UITrackingLayoutGuide", "UIView", "UIWindow"] }
 nsh-platform-linux = { git = "https://github.com/hexuria/nsh", rev = "365864ba8a3e56189f9a4fcdaf1c874313fc028e", features = ["dev"] }
 nsh-linux-host = { git = "https://github.com/hexuria/nsh", rev = "365864ba8a3e56189f9a4fcdaf1c874313fc028e" }
 nsh-platform-windows = { git = "https://github.com/hexuria/nsh", rev = "365864ba8a3e56189f9a4fcdaf1c874313fc028e", features = ["dev"] }

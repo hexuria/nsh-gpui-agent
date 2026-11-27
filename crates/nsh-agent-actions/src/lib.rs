@@ -283,6 +283,14 @@ pub trait StrictNative: Native {
         let _ = landscape;
         Err("rotate is not supported on this platform".into())
     }
+    /// Where the software keyboard covers the surface, in the surface's
+    /// points: `Ok(None)` while none shows (a desktop has none). `Err`
+    /// means the host cannot tell. A press whose point is inside the frame
+    /// would land on the keyboard, not on the app, and is refused.
+    fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
+        Ok(None)
+    }
+
     /// Shows or hides the software keyboard.
     fn keyboard(&self, shown: bool) -> Result<(), String> {
         let _ = shown;
@@ -462,6 +470,56 @@ pub struct Agent {
     scene: std::sync::Arc<dyn SemanticScene>,
     native: Box<dyn StrictNative>,
     require_hit_test: bool,
+    keyboard: std::sync::Mutex<KeyboardTrack>,
+}
+
+/// How long the software keyboard's frame must stay the same before it
+/// counts: its slide in or out takes about 250 ms, and the platforms report
+/// the end frame as the slide starts.
+pub const KEYBOARD_SETTLE: Duration = Duration::from_millis(300);
+
+/// How much of a target must show above the software keyboard, in points,
+/// for a press on that part (all of a target shorter than this).
+const KEYBOARD_MIN_VISIBLE: f32 = 8.0;
+
+/// The longest [`Agent::keyboard_frame`] waits for a moving keyboard.
+const KEYBOARD_SETTLE_MAX: Duration = Duration::from_millis(1500);
+
+/// The keyboard frames the platform reported, and the one that settled.
+#[derive(Debug, Default)]
+struct KeyboardTrack {
+    /// The last frame read (`None` inside: no keyboard).
+    last: Option<Option<Bounds<Points>>>,
+    /// When `last` was first read.
+    since: Option<Instant>,
+    /// The last frame that stayed the same for [`KEYBOARD_SETTLE`].
+    settled: Option<Bounds<Points>>,
+}
+
+impl KeyboardTrack {
+    /// Takes the frame read at `now`; `None` when it has settled (then
+    /// [`KeyboardTrack::settled`] is it), else when it will have.
+    fn observe(&mut self, read: Option<Bounds<Points>>, now: Instant) -> Option<Instant> {
+        // No keyboard at the first look (a desktop, a phone with none up):
+        // nothing to wait for.
+        if self.last.is_none() && read.is_none() {
+            self.last = Some(None);
+            self.since = Some(now);
+            self.settled = None;
+            return None;
+        }
+        if self.last != Some(read) {
+            self.last = Some(read);
+            self.since = Some(now);
+        }
+        let settles = self.since.unwrap_or(now) + KEYBOARD_SETTLE;
+        if now >= settles {
+            self.settled = read;
+            None
+        } else {
+            Some(settles)
+        }
+    }
 }
 
 impl Agent {
@@ -471,6 +529,7 @@ impl Agent {
             scene,
             native,
             require_hit_test: false,
+            keyboard: std::sync::Mutex::default(),
         }
     }
 
@@ -483,6 +542,7 @@ impl Agent {
             scene,
             native,
             require_hit_test: true,
+            keyboard: std::sync::Mutex::default(),
         }
     }
 
@@ -622,7 +682,7 @@ impl Agent {
 
     /// Clicks semantic node `id`, after native actionability is established.
     pub fn press_node(&self, id: NodeId) -> Result<(), String> {
-        self.settled()?;
+        self.settled_and_keyboard()?;
         let selector = format!("node {id}");
         let nodes = self.scene.semantic_tree()?;
         let target = nodes
@@ -678,6 +738,46 @@ impl Agent {
         self.native.rotate(landscape).and_then(|()| self.settled())
     }
 
+    /// Where the software keyboard covers the surface once it has stopped
+    /// moving ([`StrictNative::keyboard_frame`]): a frame counts when it
+    /// has stayed the same for [`KEYBOARD_SETTLE`], so while the keyboard
+    /// slides in this waits for it to arrive, and while it slides out it
+    /// still covers where it was. Waits 1.5 s at most;
+    /// a frame that never settles counts as it was last read.
+    pub fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
+        let deadline = Instant::now() + KEYBOARD_SETTLE_MAX;
+        loop {
+            let read = self.native.keyboard_frame()?;
+            let now = Instant::now();
+            let mut track = self.keyboard.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(settles) = track.observe(read, now) else {
+                return Ok(track.settled);
+            };
+            drop(track);
+            if now >= deadline {
+                return Ok(read);
+            }
+            while Instant::now() < settles {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+
+    /// [`Agent::settled`], then the software keyboard settled too
+    /// ([`Agent::keyboard_frame`]): a step reads the tree only once the
+    /// keyboard has stopped moving, so a control `adjustResize` moved
+    /// above the keyboard is where the tree says.
+    fn settled_and_keyboard(&self) -> Result<(), String> {
+        self.settled()?;
+        let _ = self.keyboard_frame();
+        Ok(())
+    }
+
+    /// Whether the platform can tell where the software keyboard is.
+    pub fn keyboard_known(&self) -> bool {
+        self.native.keyboard_frame().is_ok()
+    }
+
     /// Shows or hides the software keyboard.
     pub fn keyboard(&self, shown: bool) -> Result<(), String> {
         self.native.keyboard(shown).and_then(|()| self.settled())
@@ -685,7 +785,7 @@ impl Agent {
 
     /// Types `text` into input `id`, focusing it first when needed, and waits for the resulting state.
     pub fn type_node(&self, id: NodeId, text: &str) -> Result<(), String> {
-        let at = self.node_point(id)?;
+        self.settled()?;
         let node = self
             .scene
             .semantic_tree()?
@@ -695,16 +795,141 @@ impl Agent {
         if !node.input {
             return Err(format!("node {id} is not a text input"));
         }
+        if !node.enabled {
+            return Err(format!("node {id} is disabled"));
+        }
+        // An input that has the focus takes the keys where it is, even
+        // under the software keyboard (a person types into it there too):
+        // only a press to focus it needs a point that is clear.
         if self.native.focused() != Some(id) {
-            self.native.press(at);
+            self.press_to_focus(id, &node)?;
         }
         self.native.type_text(text);
         self.settled()
     }
 
+    /// Presses input `id` (`node`) to give it the focus. An input under an
+    /// overlay of its own component (NSH's `OtpInput` / pin cells: the cells
+    /// over the text field that takes the keys, under the same parent) is
+    /// pressed on the overlay, as a finger does, only when nothing there
+    /// takes the press itself ([`Agent::overlay_passes`]); the point is
+    /// re-hit-tested, and the press must then have given the input the
+    /// focus. Any other occluder refuses the press.
+    fn press_to_focus(&self, id: NodeId, node: &SemanticNode) -> Result<(), String> {
+        let error = match self.node_point(id) {
+            Ok(at) => {
+                self.native.press(at);
+                return Ok(());
+            }
+            Err(error) => error,
+        };
+        let Some(hit) = error
+            .strip_prefix("occluded_by: ")
+            .and_then(|rest| rest.parse::<NodeId>().ok())
+        else {
+            return Err(error);
+        };
+        let Some(component) = node.parent else {
+            return Err(error);
+        };
+        let nodes = self.scene.semantic_tree()?;
+        let by_id: std::collections::HashMap<NodeId, &SemanticNode> =
+            nodes.iter().map(|node| (node.id, node)).collect();
+        // The input's visible part: the viewport, its bounds and every
+        // clipping view around it.
+        let viewport = Bounds::new(Point::default(), self.native.viewport());
+        let Some(mut visible) = self
+            .native
+            .bounds(id)
+            .and_then(|bounds| intersection(viewport, bounds))
+        else {
+            return Err(error);
+        };
+        let mut parent = node.parent;
+        while let Some(ancestor) = parent.and_then(|parent| by_id.get(&parent)) {
+            if ancestor.clipping {
+                let Some(clipped) = self
+                    .native
+                    .bounds(ancestor.id)
+                    .and_then(|bounds| intersection(visible, bounds))
+                else {
+                    return Err(error);
+                };
+                visible = clipped;
+            }
+            parent = ancestor.parent;
+        }
+        let at = self.clear_of_keyboard(visible, visible.center(), false, &format!("node {id}"))?;
+        if !self.overlay_passes(&nodes, hit, id, component, at) {
+            return Err(error);
+        }
+        // What is under the point now is what the press goes to.
+        match self.native.hit_at(at)? {
+            Some(now) if now == id || self.overlay_passes(&nodes, now, id, component, at) => {}
+            Some(now) => return Err(format!("occluded_by: {now}")),
+            None => return Err(error),
+        }
+        self.native.press(at);
+        self.settled()?;
+        if self.native.focused() == Some(id) {
+            Ok(())
+        } else {
+            Err(format!(
+                "{error}: a press on its overlay at ({}, {}) did not give node {id} the focus",
+                at.x.0, at.y.0
+            ))
+        }
+    }
+
+    /// Whether a press at `at` that natively hits `hit` passes through to
+    /// input `id`: `hit` is inside `component` (the input's parent), no
+    /// view from `hit` up to the component takes presses or holds itself or
+    /// is another input, and the press goes to no receiver but the input.
+    /// A touch observer (the cells of a code box) passes.
+    fn overlay_passes(
+        &self,
+        nodes: &[SemanticNode],
+        hit: NodeId,
+        id: NodeId,
+        component: NodeId,
+        at: Point<Points>,
+    ) -> bool {
+        let parents = mounted_parents(nodes);
+        let by_id: std::collections::HashMap<NodeId, &SemanticNode> =
+            nodes.iter().map(|node| (node.id, node)).collect();
+        let hidden_press_owners: std::collections::HashMap<NodeId, NodeId> = nodes
+            .iter()
+            .flat_map(|node| node.hidden_press_owners.iter().copied())
+            .collect();
+        if hidden_press_owners.contains_key(&hit) {
+            return false;
+        }
+        let mut current = Some(hit);
+        let mut inside = false;
+        while let Some(view) = current {
+            if view == component {
+                inside = true;
+                break;
+            }
+            if let Some(node) = by_id.get(&view)
+                && (node.pressable || node.long_press || (node.input && node.id != id))
+            {
+                return false;
+            }
+            current = parents.get(&view).copied().flatten();
+        }
+        if !inside {
+            return false;
+        }
+        match self.press_receiver(nodes, &by_id, &parents, &hidden_press_owners, hit, at) {
+            None => true,
+            Some(receiver) => receiver == id,
+        }
+    }
+
     /// Replaces the value of input `id`.
     pub fn set_value_node(&self, id: NodeId, value: &str) -> Result<(), String> {
-        let at = self.node_point(id)?;
+        self.settled()?;
         let node = self
             .scene
             .semantic_tree()?
@@ -714,7 +939,12 @@ impl Agent {
         if !node.input {
             return Err(format!("node {id} is not a text input"));
         }
-        self.native.press(at);
+        if !node.enabled {
+            return Err(format!("node {id} is disabled"));
+        }
+        if self.native.focused() != Some(id) {
+            self.press_to_focus(id, &node)?;
+        }
         self.native.key(Key::SelectAll);
         self.native.key(Key::Backspace);
         self.native.type_text(value);
@@ -734,12 +964,15 @@ impl Agent {
             return Err(format!("node {id} is disabled"));
         }
         self.native.validate_keys(keys)?;
-        let at = self.node_point(id)?;
-        if let Err(error) = self.native.focus_node(id) {
-            if node.input && error == NATIVE_FOCUS_UNSUPPORTED {
-                self.native.press(at);
-            } else {
-                return Err(error);
+        // A focused input takes the keys where it is (see `type_node`).
+        if !(node.input && self.native.focused() == Some(id)) {
+            let at = self.node_point(id)?;
+            if let Err(error) = self.native.focus_node(id) {
+                if node.input && error == NATIVE_FOCUS_UNSUPPORTED {
+                    self.native.press(at);
+                } else {
+                    return Err(error);
+                }
             }
         }
         self.native.press_keys(keys)?;
@@ -1009,7 +1242,7 @@ impl Agent {
     }
 
     fn node_point(&self, id: NodeId) -> Result<Point<Points>, String> {
-        self.settled()?;
+        self.settled_and_keyboard()?;
         let selector = format!("node {id}");
         let node = self
             .scene
@@ -1033,7 +1266,7 @@ impl Agent {
         at: Point<Points>,
         actionability: PointActionability,
     ) -> Result<(NodeId, Point<Points>), String> {
-        self.settled()?;
+        self.settled_and_keyboard()?;
         let id = self
             .native
             .hit_at(at)?
@@ -1620,6 +1853,7 @@ impl Agent {
         } else {
             visible.center()
         };
+        let at = self.clear_of_keyboard(visible, at, explicit, selector)?;
         let parents = mounted_parents(&nodes);
         // A press on a hidden view that takes presses itself goes to it,
         // not to the target.
@@ -1776,6 +2010,48 @@ impl Agent {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// `at`, or, when the software keyboard covers it, the middle of the
+    /// part of `visible` above the keyboard's top edge, as a finger finds
+    /// the part of a control the keyboard leaves showing. A point the
+    /// caller chose (`explicit`) is not moved. Refused with `occluded_by`
+    /// when the keyboard covers the target: a press there lands on a key.
+    /// A host that cannot tell where the keyboard is leaves `at` as it is.
+    fn clear_of_keyboard(
+        &self,
+        visible: Bounds<Points>,
+        at: Point<Points>,
+        explicit: bool,
+        selector: &str,
+    ) -> Result<Point<Points>, String> {
+        let Ok(Some(keyboard)) = self.keyboard_frame() else {
+            return Ok(at);
+        };
+        if !keyboard.contains(&at) {
+            return Ok(at);
+        }
+        // A finger needs some of the target above the keyboard: all of a
+        // short one, or 8 points of a tall one.
+        let reachable = KEYBOARD_MIN_VISIBLE.min(visible.size.height.0);
+        if !explicit && keyboard.origin.y.0 - visible.origin.y.0 >= reachable {
+            let above = Bounds::new(
+                visible.origin,
+                Size::new(
+                    visible.size.width,
+                    Points(keyboard.origin.y.0 - visible.origin.y.0),
+                ),
+            );
+            let at = above.center();
+            if !keyboard.contains(&at) {
+                return Ok(at);
+            }
+        }
+        Err(format!(
+            "occluded_by: software keyboard (a press on `{selector}` at ({}, {}) lands on a key; \
+             hide the keyboard or scroll the target above it first)",
+            at.x.0, at.y.0
+        ))
     }
 
     /// The middle of view `id` on screen, scrolled into view first when it
@@ -2001,6 +2277,7 @@ impl Agent {
     }
 
     fn long_press(&self, id: NodeId, hold: Option<Duration>) -> Result<(), String> {
+        self.settled_and_keyboard()?;
         let selector = &format!("view:{id}");
         self.settled()?;
         let (what, target) = match self.long_pressable(id)? {

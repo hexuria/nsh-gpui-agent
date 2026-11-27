@@ -26,6 +26,16 @@ use nsh_core::{
     geometry::{Point, Points},
 };
 
+/// The id of the node a snapshot ends with while the software keyboard
+/// shows: role `keyboard`, its bounds the keyboard's frame. Absent while
+/// the keyboard is hidden, so `wait_until system-keyboard` waits for the
+/// keyboard and `wait_until system-keyboard --absent` for it to go.
+pub const SOFTWARE_KEYBOARD_ID: &str = "system-keyboard";
+
+/// The `hello.features` entry of a host that reports the software keyboard
+/// ([`SOFTWARE_KEYBOARD_ID`]) and refuses presses on it.
+pub const SOFTWARE_KEYBOARD_FEATURE: &str = "software_keyboard";
+
 /// Native Shell host exposed through GPUI-agent.
 #[non_exhaustive]
 pub struct NshAgentHost {
@@ -239,6 +249,8 @@ impl AgentHost for NshAgentHost {
                 rev: None,
             };
         }
+        // The keyboard first: once it has settled, the tree is laid out for it.
+        let keyboard = self.agent.keyboard_frame();
         let Ok(nodes) = self.agent.semantic_nodes() else {
             return UiTree {
                 app: self.app.clone(),
@@ -249,7 +261,7 @@ impl AgentHost for NshAgentHost {
             };
         };
         let index = SnapshotIndex::new(&nodes, self.agent.as_ref());
-        let roots = nodes
+        let mut roots: Vec<UiNode> = nodes
             .iter()
             .filter(|node| {
                 node.parent
@@ -257,6 +269,9 @@ impl AgentHost for NshAgentHost {
             })
             .map(|node| ui_node(node, &index, self.agent.as_ref()))
             .collect();
+        if let Ok(Some(frame)) = keyboard {
+            roots.push(keyboard_node(frame));
+        }
         // A resize or a failed call while the nodes were read.
         if !self.agent.native_available()
             || self.agent.native_laid_out().is_err()
@@ -373,6 +388,12 @@ impl NshAgentHost {
                 _ => vec!["press", "scroll", "hover", "drag", "viewport"],
             }
         };
+        if !self.tab_mode
+            && matches!(self.platform, PlatformKind::Mobile)
+            && self.agent.keyboard_known()
+        {
+            names.push(SOFTWARE_KEYBOARD_FEATURE);
+        }
         if !self.tab_mode && matches!(self.platform, PlatformKind::Mobile) {
             // Every mobile driver supports paste; the OS gates below are
             // about the driver's own platform — the iOS driver runs on the
@@ -676,6 +697,21 @@ impl<'a> SnapshotIndex<'a> {
             viewport: agent.native_viewport(),
         }
     }
+}
+
+/// The snapshot's node for the software keyboard showing at `frame`: not
+/// one of the app's views, so it takes no action (`enabled: false`).
+fn keyboard_node(frame: nsh_core::geometry::Bounds<Points>) -> UiNode {
+    let mut node = UiNode::new(SOFTWARE_KEYBOARD_ID, "keyboard", "Software keyboard");
+    node.enabled = false;
+    node.bounds = gpui_agent::Bounds {
+        x: frame.origin.x.0,
+        y: frame.origin.y.0,
+        w: frame.size.width.0,
+        h: frame.size.height.0,
+    };
+    node.states.push("system".into());
+    node
 }
 
 fn ui_node(node: &SemanticNode, index: &SnapshotIndex<'_>, agent: &Agent) -> UiNode {
@@ -1323,6 +1359,7 @@ mod tests {
         hit: Option<NodeId>,
         presses: Arc<std::sync::Mutex<Vec<Point<Points>>>>,
         drags: DragRecords,
+        keyboard: Result<Option<Bounds<Points>>, String>,
     }
 
     impl SnapshotNative {
@@ -1334,6 +1371,7 @@ mod tests {
                 hit: Some(3),
                 presses: Arc::default(),
                 drags: Arc::default(),
+                keyboard: Ok(None),
             }
         }
     }
@@ -1341,6 +1379,10 @@ mod tests {
     impl StrictNative for SnapshotNative {
         fn available(&self) -> bool {
             self.available
+        }
+
+        fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
+            self.keyboard.clone()
         }
 
         fn laid_out(&self) -> Result<(), String> {
@@ -1601,6 +1643,67 @@ mod tests {
             PlatformKind::Mobile => assert!(lists("swipe") && !lists("hover")),
             _ => assert!(lists("hover") && !lists("swipe")),
         }
+    }
+
+    fn keyboard_host(keyboard: Result<Option<Bounds<Points>>, String>) -> NshAgentHost {
+        let mut native = SnapshotNative::new(true, None, false);
+        native.keyboard = keyboard;
+        let agent = Arc::new(Agent::requiring_native_hit_test(
+            Arc::new(SnapshotScene(Ok(sample_nodes()), 1, Default::default())),
+            Box::new(native),
+        ));
+        NshAgentHost::new("test", PlatformKind::Mobile, agent).unwrap()
+    }
+
+    #[test]
+    fn snapshot_ends_with_the_software_keyboard_while_it_shows() {
+        let frame = Bounds::new(
+            Point::new(Points(0.0), Points(500.0)),
+            Size::new(Points(390.0), Points(344.0)),
+        );
+        let snapshot = keyboard_host(Ok(Some(frame))).snapshot();
+        let keyboard = snapshot.nodes.last().unwrap();
+        assert_eq!(keyboard.id, SOFTWARE_KEYBOARD_ID);
+        assert_eq!(keyboard.role, "keyboard");
+        assert!(!keyboard.enabled, "the keyboard is not an app control");
+        assert_eq!(
+            (
+                keyboard.bounds.x,
+                keyboard.bounds.y,
+                keyboard.bounds.w,
+                keyboard.bounds.h
+            ),
+            (0.0, 500.0, 390.0, 344.0)
+        );
+
+        for hidden in [Ok(None), Err("unknown".to_string())] {
+            let snapshot = keyboard_host(hidden).snapshot();
+            assert!(snapshot.ready);
+            assert!(
+                snapshot
+                    .nodes
+                    .iter()
+                    .all(|node| node.id != SOFTWARE_KEYBOARD_ID),
+                "no keyboard node while none shows or the host cannot tell"
+            );
+        }
+    }
+
+    #[test]
+    fn mobile_hello_says_whether_it_reports_the_software_keyboard() {
+        let lists = |host: NshAgentHost| {
+            host.hello()
+                .features
+                .iter()
+                .any(|name| name == SOFTWARE_KEYBOARD_FEATURE)
+        };
+        assert!(lists(keyboard_host(Ok(None))));
+        assert!(!lists(keyboard_host(Err("unknown".into()))));
+        assert!(!lists(snapshot_host(SnapshotScene(
+            Ok(sample_nodes()),
+            1,
+            Default::default()
+        ))));
     }
 
     #[test]

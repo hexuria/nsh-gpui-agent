@@ -80,6 +80,7 @@ impl Attachment {
             native: surface.native(),
             surface: surface.clone(),
             alive: alive.clone(),
+            guide_laid_out: AtomicBool::new(false),
         };
         let agent = Arc::new(Agent::requiring_native_hit_test(
             model.clone(),
@@ -114,6 +115,8 @@ struct IosNative {
     native: Box<dyn Native>,
     surface: DevelopmentSurface,
     alive: Arc<AtomicBool>,
+    /// The window's keyboard layout guide has been laid out once.
+    guide_laid_out: AtomicBool,
 }
 
 impl StrictNative for IosNative {
@@ -157,6 +160,37 @@ impl StrictNative for IosNative {
                 Ok(None)
             })
             .unwrap_or_else(|| Err("the window is gone".to_owned()))
+    }
+
+    /// The docked software keyboard's frame, from the window's keyboard
+    /// layout guide (iOS 15): the guide sits on the bottom safe area while no
+    /// keyboard shows, so a guide no taller than that area is no keyboard.
+    /// A floating or undocked iPad keyboard is not followed by the guide. The
+    /// guide takes the end frame as the keyboard starts to slide; the agent
+    /// counts a frame once it has stayed put (`Agent::keyboard_frame`).
+    fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
+        let first = !self.guide_laid_out.swap(true, Ordering::AcqRel);
+        self.surface
+            .with_views(move |_, window, _| {
+                let guide = window.keyboardLayoutGuide();
+                // UIKit makes the guide on first use; its frame is zero until
+                // a layout pass places it.
+                if first {
+                    window.layoutIfNeeded();
+                }
+                let frame = guide.layoutFrame();
+                let bottom_safe_area = window.safeAreaInsets().bottom;
+                (frame.size.height - bottom_safe_area > 1.0).then(|| {
+                    Bounds::new(
+                        Point::new(Points(frame.origin.x as f32), Points(frame.origin.y as f32)),
+                        Size::new(
+                            Points(frame.size.width as f32),
+                            Points(frame.size.height as f32),
+                        ),
+                    )
+                })
+            })
+            .ok_or_else(|| "the window is gone".to_owned())
     }
 
     fn fire_keybinding(&self, binding: &SemanticKeybinding) -> Result<(), String> {
