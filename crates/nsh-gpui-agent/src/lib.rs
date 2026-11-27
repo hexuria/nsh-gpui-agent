@@ -922,7 +922,7 @@ fn visible_in_viewport(node: &SemanticNode, index: &SnapshotIndex<'_>) -> bool {
     };
     let viewport = index.viewport;
     let (mut x0, mut y0, mut x1, mut y1) = (0.0_f32, 0.0_f32, viewport.width.0, viewport.height.0);
-    let mut parent = node.parent;
+    let mut parent = if node.modal { None } else { node.parent };
     while let Some(id) = parent {
         let Some(ancestor) = index.known.get(&id) else {
             return false;
@@ -935,6 +935,9 @@ fn visible_in_viewport(node: &SemanticNode, index: &SnapshotIndex<'_>) -> bool {
             y0 = y0.max(clip.origin.y.0);
             x1 = x1.min(clip.origin.x.0 + clip.size.width.0);
             y1 = y1.min(clip.origin.y.0 + clip.size.height.0);
+        }
+        if ancestor.modal {
+            break;
         }
         parent = ancestor.parent;
     }
@@ -1560,6 +1563,9 @@ mod tests {
                 2 => (80.0, 80.0, 30.0, 30.0),
                 3 => (5.0, 5.0, 10.0, 10.0),
                 5 => (0.0, 45.0, 50.0, 5.0),
+                10 => (0.0, 45.0, 50.0, 0.0),
+                11 => (0.0, 0.0, 50.0, 50.0),
+                12 => (5.0, 20.0, 20.0, 20.0),
                 _ => return None,
             };
             Some(Bounds::new(
@@ -1633,6 +1639,16 @@ mod tests {
         NshAgentHost::new("test", platform, agent).unwrap()
     }
 
+    fn find_ui<'a>(nodes: &'a [UiNode], id: &str) -> Option<&'a UiNode> {
+        nodes.iter().find_map(|node| {
+            if node.id == id {
+                Some(node)
+            } else {
+                find_ui(&node.children, id)
+            }
+        })
+    }
+
     fn sample_nodes() -> Vec<SemanticNode> {
         let mut root = SemanticNode::default();
         root.id = 1;
@@ -1674,6 +1690,36 @@ mod tests {
         let compact = gpui_agent::compact_lines(&snapshot);
         assert!(compact.contains("hint: search gallery"));
         assert!(compact.contains("[grouped]"));
+    }
+
+    #[test]
+    fn snapshot_modal_content_reports_painted_frame_across_zero_height_host() {
+        let mut host = SemanticNode::default();
+        host.id = 10;
+        host.parent = Some(1);
+        host.test_id = Some("sheet-host".into());
+        host.clipping = true;
+        let mut modal = SemanticNode::default();
+        modal.id = 11;
+        modal.parent = Some(10);
+        modal.role = "dialog".into();
+        modal.modal = true;
+        let mut done = SemanticNode::default();
+        done.id = 12;
+        done.parent = Some(11);
+        done.test_id = Some("sheet-done".into());
+        done.role = "button".into();
+        let mut nodes = sample_nodes();
+        nodes.extend([host, modal, done]);
+
+        let host = snapshot_host(SnapshotScene(Ok(nodes), 1, Default::default()));
+        let snapshot = host.snapshot();
+        let done = find_ui(&snapshot.nodes, "sheet-done").unwrap();
+        assert!(done.visible);
+        assert_eq!(done.bounds.x, 5.0);
+        assert_eq!(done.bounds.y, 20.0);
+        assert_eq!(done.bounds.w, 20.0);
+        assert_eq!(done.bounds.h, 20.0);
     }
 
     #[test]

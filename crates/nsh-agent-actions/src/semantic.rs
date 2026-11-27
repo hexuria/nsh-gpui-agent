@@ -370,6 +370,7 @@ pub(crate) fn nodes(screen: &impl ScreenData) -> Vec<SemanticNode> {
             selected: view.selected(),
             grouped: view.accessible() == Some(true),
             clipping: view.clips() || view.scrolls(),
+            modal: view.kind() == Some(ViewKind::Modal),
             input: view.kind() == Some(ViewKind::Input),
             scroll: view.kind() == Some(ViewKind::Scroll) || view.scrolls(),
             pressable: view.listens(EventKind::Press),
@@ -578,6 +579,22 @@ mod tests {
         assert!(bad.long_press_disabled(2).is_err());
         let failed = RemoteScene::new(|_| Err("disconnected".into()));
         assert_eq!(failed.semantic_tree().unwrap_err(), "disconnected");
+    }
+
+    #[test]
+    fn semantic_tree_marks_modal_roots_in_live_and_remote_trees() {
+        let mut screen = Screen::default();
+        screen.apply(&batch(vec![
+            create(2, ViewKind::View),
+            insert(ROOT, 2),
+            create(3, ViewKind::Modal),
+            insert(2, 3),
+        ]));
+        for tree in [nodes(&screen), nodes(&screen.snapshot())] {
+            let modal = tree.iter().find(|node| node.id == 3).unwrap();
+            assert!(modal.modal);
+            assert_eq!(modal.parent, Some(2));
+        }
     }
 
     #[test]
