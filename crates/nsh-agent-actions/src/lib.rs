@@ -537,13 +537,12 @@ pub fn selections_from_triples(
     values: &[i32],
 ) -> std::collections::HashMap<NodeId, (u32, u32)> {
     let mut out = std::collections::HashMap::new();
-    if values.len() % 3 != 0 {
+    if !values.len().is_multiple_of(3) {
         return out;
     }
     let mut seen = std::collections::HashSet::new();
     let mut twice = std::collections::HashSet::new();
-    for triple in values.chunks_exact(3) {
-        let [id, start, end] = [triple[0], triple[1], triple[2]];
+    for &[id, start, end] in values.as_chunks::<3>().0 {
         let Ok(id) = NodeId::try_from(id) else {
             continue;
         };
