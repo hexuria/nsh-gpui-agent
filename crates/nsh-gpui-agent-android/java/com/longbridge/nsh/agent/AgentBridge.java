@@ -302,6 +302,38 @@ public final class AgentBridge {
         }
     }
 
+    /**
+     * The selections of input nodes {@code ids} as their EditTexts hold them,
+     * in one main-thread hop: an (id, start, end) triple for each that has
+     * one, in UTF-16 code units, start first (the direction a selection was
+     * made in is dropped; a bare caret has equal ends). Ids that are no
+     * input, or whose field has no selection, are left out.
+     */
+    public static int[] inputSelections(View host, int[] ids) {
+        return onMain(() -> {
+            SparseArray views = views(host);
+            int[] out = new int[ids.length * 3];
+            int n = 0;
+            for (int id : ids) {
+                // One field that cannot be read leaves the others' selections.
+                try {
+                    Object view = views.get(id);
+                    if (!inputBoxClass.isInstance(view)) continue;
+                    EditText edit = (EditText) inputEdit.get(view);
+                    if (edit == null) continue;
+                    int start = edit.getSelectionStart(), end = edit.getSelectionEnd();
+                    if (start < 0 || end < 0) continue;
+                    out[n++] = id;
+                    out[n++] = Math.min(start, end);
+                    out[n++] = Math.max(start, end);
+                } catch (Exception e) {
+                    Log.w("nsh", "test agent: selection of " + id + ": " + e);
+                }
+            }
+            return java.util.Arrays.copyOf(out, n);
+        }, new int[0]);
+    }
+
     /** Whether the surface's window has focus. */
     public static boolean appFocused(View host) {
         return onMain(host::hasWindowFocus, false);
@@ -536,6 +568,16 @@ public final class AgentBridge {
 
     /** {@code call} on the main thread, waited for (10 s at most). */
     private static <T> T onMain(Callable<T> call) {
+        // Already on the main thread: posting and waiting would wait on
+        // ourselves until the timeout.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            try {
+                return call.call();
+            } catch (Exception e) {
+                Log.w("nsh", "test agent: " + e);
+                return null;
+            }
+        }
         FutureTask<T> task = new FutureTask<>(call);
         MAIN.post(task);
         try {

@@ -11,7 +11,7 @@ use std::{
 
 use jni::{
     JNIEnv,
-    objects::{GlobalRef, JClass, JFloatArray, JObject, JObjectArray, JString, JValue},
+    objects::{GlobalRef, JClass, JFloatArray, JIntArray, JObject, JObjectArray, JString, JValue},
 };
 use nsh_agent_actions::{StrictNative, TextMenu};
 use nsh_core::{
@@ -412,6 +412,36 @@ impl StrictNative for AndroidStrictNative {
         });
         done.then_some(())
             .ok_or_else(|| "Android could not change the requested orientation".into())
+    }
+
+    fn input_selections(&self, asked: &[NodeId]) -> std::collections::HashMap<NodeId, (u32, u32)> {
+        let ids: Vec<i32> = asked
+            .iter()
+            .filter_map(|&id| i32::try_from(id).ok())
+            .collect();
+        // One main-thread hop for every input of the snapshot: the bridge
+        // answers (id, start, end) triples for those with a selection.
+        let triples: Vec<i32> = self.call(|env, class, view| {
+            let wanted = env.new_int_array(ids.len() as i32)?;
+            env.set_int_array_region(&wanted, 0, &ids)?;
+            let array = env
+                .call_static_method(
+                    class,
+                    "inputSelections",
+                    "(Landroid/view/View;[I)[I",
+                    &[JValue::Object(view), JValue::Object(&wanted)],
+                )?
+                .l()?;
+            if array.is_null() {
+                return Ok(Vec::new());
+            }
+            let array = JIntArray::from(array);
+            let len = env.get_array_length(&array)? as usize;
+            let mut out = vec![0; len];
+            env.get_int_array_region(&array, 0, &mut out)?;
+            Ok(out)
+        });
+        nsh_agent_actions::selections_from_triples(asked, &triples)
     }
 
     fn text_menu(&self) -> Option<TextMenu> {

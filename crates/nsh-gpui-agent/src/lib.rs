@@ -688,6 +688,8 @@ struct SnapshotIndex<'a> {
     bounds: HashMap<NodeId, nsh_core::geometry::Bounds<Points>>,
     ids: HashMap<NodeId, String>,
     viewport: nsh_core::geometry::Size<Points>,
+    /// The inputs' selections, read from the platform once per snapshot.
+    selections: HashMap<NodeId, (u32, u32)>,
 }
 
 impl<'a> SnapshotIndex<'a> {
@@ -707,6 +709,18 @@ impl<'a> SnapshotIndex<'a> {
                 .collect(),
             ids: stable_ids(nodes),
             viewport: agent.native_viewport(),
+            selections: {
+                let inputs: Vec<NodeId> = nodes
+                    .iter()
+                    .filter(|node| node.input)
+                    .map(|node| node.id)
+                    .collect();
+                if inputs.is_empty() {
+                    HashMap::new()
+                } else {
+                    agent.native_input_selections(&inputs)
+                }
+            },
         }
     }
 }
@@ -746,6 +760,13 @@ fn keyboard_node(frame: nsh_core::geometry::Bounds<Points>) -> UiNode {
     };
     node.states.push("system".into());
     node
+}
+
+/// The tree state naming an input's selection: `selection: <start>-<end>`
+/// in UTF-16 code units, start first whichever way it was made (the
+/// direction is dropped), equal ends for a bare caret.
+fn selection_state(start: u32, end: u32) -> String {
+    format!("selection: {start}-{end}")
 }
 
 fn ui_node(node: &SemanticNode, index: &SnapshotIndex<'_>, agent: &Agent) -> UiNode {
@@ -821,6 +842,15 @@ fn ui_node(node: &SemanticNode, index: &SnapshotIndex<'_>, agent: &Agent) -> UiN
     }
     if node.selected && !result.states.iter().any(|state| state == "selected") {
         result.states.push("selected".into());
+    }
+    // Where the input's selection is, as the platform holds it: a state a
+    // 0.4 reader already parses and a recipe can assert (`selection: 0-9`,
+    // equal ends for a bare caret). Offsets only, so a masked field gives
+    // away no more than its bullets do.
+    if node.input
+        && let Some(&(start, end)) = index.selections.get(&node.id)
+    {
+        result.states.push(selection_state(start, end));
     }
     result.children = index
         .children
@@ -1396,6 +1426,10 @@ mod tests {
         keyboard: Result<Option<Bounds<Points>>, String>,
         /// The platform's text menu showing.
         text_menu: Option<nsh_agent_actions::TextMenu>,
+        /// Input 3's selection, as the platform holds it.
+        selection: Option<(u32, u32)>,
+        /// How many times the selections were read.
+        selection_reads: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl SnapshotNative {
@@ -1409,6 +1443,8 @@ mod tests {
                 drags: Arc::default(),
                 keyboard: Ok(None),
                 text_menu: None,
+                selection: None,
+                selection_reads: Arc::default(),
             }
         }
     }
@@ -1436,6 +1472,15 @@ mod tests {
 
         fn text_menu(&self) -> Option<nsh_agent_actions::TextMenu> {
             self.text_menu.clone()
+        }
+
+        fn input_selections(&self, ids: &[NodeId]) -> HashMap<NodeId, (u32, u32)> {
+            self.selection_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ids.iter()
+                .filter(|&&id| id == 3)
+                .filter_map(|&id| Some((id, self.selection?)))
+                .collect()
         }
     }
 
@@ -1645,6 +1690,79 @@ mod tests {
                 .collect();
             assert_eq!(items, [("paste", false), ("select-all", false)]);
         }
+    }
+
+    #[test]
+    fn snapshot_names_an_inputs_selection_as_the_platform_holds_it() {
+        for (selection, state) in [
+            (Some((0, 7)), Some("selection: 0-7")),
+            (Some((3, 3)), Some("selection: 3-3")),
+            (None, None),
+        ] {
+            let mut nodes = sample_nodes();
+            nodes[2].role = "textbox".into();
+            nodes[2].input = true;
+            let mut native = SnapshotNative::new(true, Some("1234567".into()), false);
+            native.selection = selection;
+            let host =
+                snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);
+            let snapshot = host.snapshot();
+            let input = &snapshot.nodes[0].children[1];
+            let found: Vec<&str> = input
+                .states
+                .iter()
+                .map(String::as_str)
+                .filter(|state| state.starts_with("selection: "))
+                .collect();
+            assert_eq!(
+                found,
+                state.into_iter().collect::<Vec<_>>(),
+                "{selection:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_reads_every_inputs_selection_in_one_call() {
+        // Two inputs: one read of the platform for both, not one each.
+        let mut nodes = sample_nodes();
+        for node in &mut nodes[1..] {
+            node.role = "textbox".into();
+            node.input = true;
+        }
+        let mut native = SnapshotNative::new(true, Some("12".into()), false);
+        native.selection = Some((0, 2));
+        let reads = native.selection_reads.clone();
+        let host =
+            snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);
+        let snapshot = host.snapshot();
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            snapshot.nodes[0].children[1]
+                .states
+                .iter()
+                .any(|state| state == "selection: 0-2")
+        );
+    }
+
+    #[test]
+    fn snapshot_gives_no_selection_to_a_node_that_is_not_an_input() {
+        let nodes = sample_nodes();
+        assert!(!nodes[2].input);
+        let mut native = SnapshotNative::new(true, None, false);
+        native.selection = Some((0, 2));
+        let host =
+            snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);
+        let snapshot = host.snapshot();
+        let node = &snapshot.nodes[0].children[1];
+        assert!(
+            !node
+                .states
+                .iter()
+                .any(|state| state.starts_with("selection: ")),
+            "{:?}",
+            node.states
+        );
     }
 
     #[test]

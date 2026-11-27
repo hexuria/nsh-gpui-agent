@@ -3410,29 +3410,29 @@ fn a_small_visible_field_inside_a_touch_observer_still_occludes_its_hold() {
 
 #[test]
 fn a_hold_within_a_node_refuses_a_point_scrolled_off_the_window() {
-    // The box runs from y 50 to 150 in a 100-point window: its lower half
-    // is off screen, though inside the node.
+    // The box runs from y 40 to 140 in a 100-point window: its middle (y
+    // 90) shows, its lower part is off screen, though inside the node.
     let long_presses = Arc::new(Mutex::new(Vec::new()));
     let agent = code_box_agent_at(
         code_box_scene(false, CodeCover::OwnInput),
         CodeCover::OwnInput,
-        point(px(20.0), px(50.0)),
+        point(px(20.0), px(40.0)),
         long_presses.clone(),
     );
 
     let error = agent
         .long_press_node_within(2, point(px(10.0), px(80.0)), None)
         .unwrap_err();
-    assert!(error.contains("offscreen"), "{error}");
+    assert!(error.contains("outside its visible area"), "{error}");
     assert!(long_presses.lock().unwrap().is_empty());
 
-    // Its upper half is still held where aimed.
+    // Its part on screen is still held where aimed.
     agent
         .long_press_node_within(2, point(px(10.0), px(20.0)), None)
         .unwrap();
     assert_eq!(
         *long_presses.lock().unwrap(),
-        vec![(point(px(30.0), px(70.0)), Duration::from_millis(600))]
+        vec![(point(px(30.0), px(60.0)), Duration::from_millis(600))]
     );
 }
 
@@ -3455,4 +3455,33 @@ fn a_text_menu_is_read_only_from_a_known_kind() {
         TextMenu::from_strings(&strings(&["paste", "select-all"])),
         None
     );
+}
+
+#[test]
+fn selections_from_triples_keeps_whole_asked_triples() {
+    let got = selections_from_triples(&[3, 7], &[3, 0, 9, 7, 2, 2]);
+    assert_eq!(got.get(&3), Some(&(0, 9)));
+    assert_eq!(got.get(&7), Some(&(2, 2)));
+    assert_eq!(got.len(), 2);
+}
+
+#[test]
+fn selections_from_triples_refuses_a_short_or_misaligned_answer() {
+    for values in [&[3, 0, 9, 7][..], &[3, 0, 9, 7, 2][..], &[3, 0][..]] {
+        assert!(
+            selections_from_triples(&[3, 7], values).is_empty(),
+            "{values:?}"
+        );
+    }
+}
+
+#[test]
+fn selections_from_triples_drops_unasked_duplicate_and_bad_ids() {
+    // 5 was not asked; 3 comes twice; 7 ends before it starts; -1 is no id.
+    let got = selections_from_triples(
+        &[3, 7, 8],
+        &[5, 0, 1, 3, 0, 9, 3, 1, 1, 7, 4, 2, -1, 0, 0, 8, 1, 4],
+    );
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got.get(&8), Some(&(1, 4)));
 }
