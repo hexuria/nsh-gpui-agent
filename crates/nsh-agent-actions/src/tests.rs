@@ -3159,3 +3159,279 @@ fn no_keyboard_at_the_first_look_needs_no_wait() {
     assert_eq!(track.observe(None, start), None);
     assert_eq!(track.settled, None);
 }
+
+/// Where a one-time-code box's hidden field is mounted: inside the box,
+/// beside it (a sibling over it), or no field at all and a pressable
+/// overlay over the box instead.
+#[derive(Clone, Copy)]
+enum CodeCover {
+    OwnInput,
+    /// A small visible field inside the box (a card with a field in it).
+    SmallOwnInput,
+    SiblingInput,
+    Overlay,
+}
+
+/// A code box (node 2, `code`, 60 by 100 at (20, 0)) that observes raw
+/// touches, and, when `long_press`, has a long-press recognizer too. Node 3
+/// covers it, as `cover` says.
+fn code_box_scene(long_press: bool, cover: CodeCover) -> Arc<Model> {
+    use nsh_core::{EventMask, InputConfig, MountItem, ViewKind, ViewProps};
+
+    let model = Arc::new(Model::default());
+    let mut events = EventMask::default();
+    events.set(EventKind::Touch, true);
+    events.set(EventKind::LongPress, long_press);
+    let frame = Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0)));
+    let mut items = vec![
+        MountItem::Create {
+            id: 2,
+            kind: ViewKind::View,
+        },
+        MountItem::Frame { id: 2, frame },
+        MountItem::Insert {
+            parent: 1,
+            child: 2,
+            before: None,
+        },
+        MountItem::Events { id: 2, events },
+        MountItem::ViewProps {
+            id: 2,
+            props: Box::new(ViewProps {
+                test_id: Some("code".into()),
+                ..ViewProps::default()
+            }),
+        },
+    ];
+    let (kind, parent, cover_frame) = match cover {
+        // The field covers its box exactly, in the box's own coordinates.
+        CodeCover::OwnInput => (
+            ViewKind::Input,
+            2,
+            Bounds::new(point(px(0.0), px(0.0)), size(px(60.0), px(100.0))),
+        ),
+        CodeCover::SmallOwnInput => (
+            ViewKind::Input,
+            2,
+            Bounds::new(point(px(10.0), px(10.0)), size(px(20.0), px(20.0))),
+        ),
+        CodeCover::SiblingInput => (ViewKind::Input, 1, frame),
+        CodeCover::Overlay => (ViewKind::View, 1, frame),
+    };
+    items.extend([
+        MountItem::Create { id: 3, kind },
+        MountItem::Frame {
+            id: 3,
+            frame: cover_frame,
+        },
+        MountItem::Insert {
+            parent,
+            child: 3,
+            before: None,
+        },
+    ]);
+    match cover {
+        CodeCover::OwnInput | CodeCover::SmallOwnInput | CodeCover::SiblingInput => {
+            items.push(MountItem::Input {
+                id: 3,
+                config: Box::new(InputConfig::default()),
+            })
+        }
+        CodeCover::Overlay => {
+            let mut press = EventMask::default();
+            press.set(EventKind::Press, true);
+            items.push(MountItem::Events {
+                id: 3,
+                events: press,
+            });
+        }
+    }
+    model.apply(&MountBatch { items });
+    model
+}
+
+fn code_box_agent(model: Arc<Model>, long_presses: LongPressRecords) -> Agent {
+    code_box_agent_at(
+        model,
+        CodeCover::OwnInput,
+        point(px(20.0), px(0.0)),
+        long_presses,
+    )
+}
+
+/// The agent over [`code_box_scene`], its box's native frame at `origin`
+/// (a box scrolled partly off the 100 by 100 window when it is low) and
+/// node 3's where `cover` puts it.
+fn code_box_agent_at(
+    model: Arc<Model>,
+    cover: CodeCover,
+    origin: Point<Points>,
+    long_presses: LongPressRecords,
+) -> Agent {
+    let frame = Bounds::new(origin, size(px(60.0), px(100.0)));
+    let field = match cover {
+        CodeCover::SmallOwnInput => Bounds::new(
+            point(px(origin.x.0 + 10.0), px(origin.y.0 + 10.0)),
+            size(px(20.0), px(20.0)),
+        ),
+        _ => frame,
+    };
+    gate_long_press_agent_with(
+        model,
+        Ok(Some(3)),
+        &[(2, frame), (3, field)],
+        &[],
+        long_presses,
+    )
+}
+
+#[test]
+fn a_hold_reaches_a_touch_observer_through_its_own_hidden_field() {
+    // A code box whose hidden field covers it: the platform gives the hold
+    // to the field, and the box still hears the held finger's touches.
+    for long_press in [false, true] {
+        let long_presses = Arc::new(Mutex::new(Vec::new()));
+        let agent = code_box_agent(
+            code_box_scene(long_press, CodeCover::OwnInput),
+            long_presses.clone(),
+        );
+
+        agent.long_press_node(2, None).unwrap();
+
+        assert_eq!(
+            *long_presses.lock().unwrap(),
+            vec![(point(px(50.0), px(50.0)), Duration::from_millis(600))],
+            "long press recognizer too: {long_press}"
+        );
+    }
+}
+
+#[test]
+fn a_sibling_field_over_a_touch_observer_still_occludes_its_hold() {
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = code_box_agent(
+        code_box_scene(false, CodeCover::SiblingInput),
+        long_presses.clone(),
+    );
+
+    let error = agent.long_press_node(2, None).unwrap_err();
+
+    assert!(error.contains("occluded_by: 3"), "{error}");
+    assert!(long_presses.lock().unwrap().is_empty());
+}
+
+#[test]
+fn an_overlay_over_a_touch_observer_still_occludes_its_hold() {
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = code_box_agent(
+        code_box_scene(false, CodeCover::Overlay),
+        long_presses.clone(),
+    );
+
+    let error = agent.long_press_node(2, None).unwrap_err();
+
+    assert!(error.contains("occluded_by: 3"), "{error}");
+    assert!(long_presses.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_hold_within_a_node_lands_at_that_point_of_it() {
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = code_box_agent(
+        code_box_scene(false, CodeCover::OwnInput),
+        long_presses.clone(),
+    );
+
+    // Near the box's bottom-left corner, in its own frame.
+    agent
+        .long_press_node_within(2, point(px(10.0), px(90.0)), None)
+        .unwrap();
+
+    assert_eq!(
+        *long_presses.lock().unwrap(),
+        vec![(point(px(30.0), px(90.0)), Duration::from_millis(600))]
+    );
+}
+
+#[test]
+fn a_hold_within_a_node_refuses_a_point_outside_it() {
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = code_box_agent(
+        code_box_scene(false, CodeCover::OwnInput),
+        long_presses.clone(),
+    );
+
+    for within in [
+        point(px(60.0), px(10.0)),
+        point(px(10.0), px(100.0)),
+        point(px(-1.0), px(10.0)),
+    ] {
+        let error = agent.long_press_node_within(2, within, None).unwrap_err();
+        assert!(error.contains("outside the node"), "{within:?}: {error}");
+    }
+    assert!(long_presses.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_hold_within_a_node_is_hit_tested_where_it_lands() {
+    // The aimed point gets the same check as the centre: an overlay there
+    // occludes it.
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = code_box_agent(
+        code_box_scene(false, CodeCover::Overlay),
+        long_presses.clone(),
+    );
+
+    let error = agent
+        .long_press_node_within(2, point(px(10.0), px(90.0)), None)
+        .unwrap_err();
+
+    assert!(error.contains("occluded_by: 3"), "{error}");
+    assert!(long_presses.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_small_visible_field_inside_a_touch_observer_still_occludes_its_hold() {
+    // A card that observes touches with a field in it: a hold on the field
+    // is the field's (its text selection), not the card's.
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = code_box_agent_at(
+        code_box_scene(false, CodeCover::SmallOwnInput),
+        CodeCover::SmallOwnInput,
+        point(px(20.0), px(0.0)),
+        long_presses.clone(),
+    );
+
+    let error = agent.long_press_node(2, None).unwrap_err();
+
+    assert!(error.contains("occluded_by: 3"), "{error}");
+    assert!(long_presses.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_hold_within_a_node_refuses_a_point_scrolled_off_the_window() {
+    // The box runs from y 50 to 150 in a 100-point window: its lower half
+    // is off screen, though inside the node.
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = code_box_agent_at(
+        code_box_scene(false, CodeCover::OwnInput),
+        CodeCover::OwnInput,
+        point(px(20.0), px(50.0)),
+        long_presses.clone(),
+    );
+
+    let error = agent
+        .long_press_node_within(2, point(px(10.0), px(80.0)), None)
+        .unwrap_err();
+    assert!(error.contains("offscreen"), "{error}");
+    assert!(long_presses.lock().unwrap().is_empty());
+
+    // Its upper half is still held where aimed.
+    agent
+        .long_press_node_within(2, point(px(10.0), px(20.0)), None)
+        .unwrap();
+    assert_eq!(
+        *long_presses.lock().unwrap(),
+        vec![(point(px(30.0), px(70.0)), Duration::from_millis(600))]
+    );
+}

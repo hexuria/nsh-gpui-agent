@@ -465,6 +465,56 @@ fn is_descendant_or_same(
     false
 }
 
+/// How far, in points, a field's edges may lie from its box's and the field
+/// still cover the box (rounding of the two frames).
+const COVER_SLACK: f32 = 1.0;
+
+/// Whether `inner` covers `outer`: every edge within [`COVER_SLACK`].
+fn covers(inner: Bounds<Points>, outer: Bounds<Points>) -> bool {
+    let edges = |b: Bounds<Points>| {
+        [
+            b.origin.x.0,
+            b.origin.y.0,
+            b.origin.x.0 + b.size.width.0,
+            b.origin.y.0 + b.size.height.0,
+        ]
+    };
+    edges(inner)
+        .iter()
+        .zip(edges(outer))
+        .all(|(a, b)| (a - b).abs() <= COVER_SLACK)
+}
+
+/// Whether a hold whose `receivers` are only the target's own hidden field
+/// still reaches `target`: it does when `target` observes raw touches. The
+/// platform gives the hold to the field (its native text selection), while
+/// the touches still travel to every touch observer on their path, so a
+/// view covered by its own field (a one-time-code box) hears the held
+/// finger and can act on it. "Its own" is strict: an enabled input inside
+/// the target whose native frame covers the target's (`bounds`) within a
+/// point. A visible field somewhere inside a card, an input that is a
+/// sibling or an overlay, and a target that only has a long-press
+/// recognizer (it never hears a hold its input takes) all stay occluded.
+fn hold_reaches_through_own_input(
+    target: &SemanticNode,
+    bounds: Bounds<Points>,
+    receivers: &[NodeId],
+    by_id: &std::collections::HashMap<NodeId, &SemanticNode>,
+    parents: &std::collections::HashMap<NodeId, Option<NodeId>>,
+    native_bounds: impl Fn(NodeId) -> Option<Bounds<Points>>,
+) -> bool {
+    target.touch
+        && !receivers.is_empty()
+        && receivers.iter().all(|&receiver| {
+            receiver != target.id
+                && by_id
+                    .get(&receiver)
+                    .is_some_and(|node| node.input && node.enabled)
+                && is_descendant_or_same(receiver, target.id, parents)
+                && native_bounds(receiver).is_some_and(|field| covers(field, bounds))
+        })
+}
+
 /// Acts on a host's app through its [`SemanticScene`] and [`StrictNative`].
 pub struct Agent {
     scene: std::sync::Arc<dyn SemanticScene>,
@@ -715,6 +765,72 @@ impl Agent {
     /// established.
     pub fn long_press_node(&self, id: NodeId, hold: Option<Duration>) -> Result<(), String> {
         self.long_press(id, hold)
+    }
+
+    /// Presses and holds semantic node `id` at `within`, a point in the
+    /// node's own frame (from its top-left corner, in points): one cell of
+    /// a row of cells that is one node. The point must be inside the part
+    /// of the node on screen, and the hold passes the same actionability
+    /// check as [`Agent::long_press_node`] there; it is never moved.
+    pub fn long_press_node_within(
+        &self,
+        id: NodeId,
+        within: Point<Points>,
+        hold: Option<Duration>,
+    ) -> Result<(), String> {
+        self.settled_and_keyboard()?;
+        let selector = &format!("view:{id}");
+        self.settled()?;
+        let target = match self.long_pressable(id)? {
+            Pick::Disabled => {
+                return self
+                    .picked(Pick::Disabled, selector, "pressable view")
+                    .map(drop);
+            }
+            Pick::None => match self.scene.pick(selector, PickTarget::Input)? {
+                Pick::One(_) => PickTarget::Input,
+                _ => PickTarget::LongPressable,
+            },
+            _ => PickTarget::LongPressable,
+        };
+        // Brings the node into view as a targeted hold does.
+        let (id, _) = self.find(selector, "pressable view", target)?;
+        let nodes = self.scene.semantic_tree()?;
+        let node = nodes
+            .iter()
+            .find(|node| node.id == id)
+            .ok_or_else(|| format!("`{selector}` is offscreen (node unavailable)"))?;
+        if !node.enabled {
+            return Err(format!("`{selector}` is disabled"));
+        }
+        let geometry = self
+            .target_geometry(node)
+            .ok_or_else(|| format!("`{selector}` is offscreen (no native bounds)"))?;
+        let bounds = geometry.bounds;
+        if within.x.0 < 0.0
+            || within.y.0 < 0.0
+            || within.x.0 >= bounds.size.width.0
+            || within.y.0 >= bounds.size.height.0
+        {
+            return Err(format!(
+                "`{selector}`: ({}, {}) is outside the node ({} by {} points)",
+                within.x.0, within.y.0, bounds.size.width.0, bounds.size.height.0
+            ));
+        }
+        let at = Point::new(
+            Points(bounds.origin.x.0 + within.x.0),
+            Points(bounds.origin.y.0 + within.y.0),
+        );
+        let at = self.actionable_point_with_press_owner(
+            id,
+            geometry.owner,
+            at,
+            selector,
+            Some(id),
+            true,
+            true,
+        )?;
+        self.hold_long_press(id, at, hold)
     }
 
     /// Presses and holds a checked native point.
@@ -1935,6 +2051,15 @@ impl Agent {
                                         || (target.input
                                             && target.enabled
                                             && receivers.contains(&target.id))
+                                        || (expected == target.id
+                                            && hold_reaches_through_own_input(
+                                                target,
+                                                geometry.bounds,
+                                                &receivers,
+                                                &by_id,
+                                                &parents,
+                                                |id| self.native.bounds(id),
+                                            ))
                                 }
                             } else {
                                 match self.press_receiver(
