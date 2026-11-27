@@ -2057,7 +2057,10 @@ impl Agent {
                 // Scrolling can bring the field underneath another view.
                 self.scene.pick(selector, target)?;
             }
-            return Ok((id, self.actionable_point_scrolling_clear(id, owner, at, selector)?));
+            return Ok((
+                id,
+                self.actionable_point_scrolling_clear(id, owner, at, selector)?,
+            ));
         };
         // A span of a text: its text view comes into view, then the finger
         // goes on its characters.
@@ -2513,10 +2516,7 @@ impl Agent {
             // from the middle: it does not shoot past it.
             let want = (at.y.0 - middle_y).abs().min(extent / 3.0);
             let step = if below { want } else { -want };
-            let fallback = point(
-                scroller_bounds.center().x,
-                scroller_bounds.center().y,
-            );
+            let fallback = point(scroller_bounds.center().x, scroller_bounds.center().y);
             let middle = self
                 .landing(scroller, &scroller_bounds, false, 0.5)
                 .map(|along| {

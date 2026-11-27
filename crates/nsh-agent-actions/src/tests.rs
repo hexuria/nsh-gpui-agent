@@ -3762,4 +3762,3 @@ fn a_press_occluded_by_a_cover_that_does_not_move_still_refuses() {
     assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 0);
     GATE_SCROLLED.with(|scrolled| scrolled.set(false));
 }
-
