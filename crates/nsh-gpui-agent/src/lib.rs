@@ -36,10 +36,15 @@ pub const SOFTWARE_KEYBOARD_ID: &str = "system-keyboard";
 /// menu shows over an input (Android's floating toolbar): role `menu`, its
 /// kind a state (`selection`, `insertion`, `edit`), a `field: <id>` state
 /// naming the input it is over when the platform can tell, its visible items
-/// children of role `menuitem` named by a fixed word (`cut`, `copy`,
-/// `paste`, `select-all`, …, `other`), none for a masked field, all
-/// `system` and taking no action. Absent
-/// while no such menu shows.
+/// children of role `menuitem` with ids `system-text-menu-<word>` named by
+/// a fixed word (`cut`, `copy`, `paste`, `select-all`, …, `other`), none for
+/// a masked field, all `system`. Cut, copy, paste and select-all take a
+/// press, through the menu ([`nsh_agent_actions::Agent::press_text_menu_item`]);
+/// the rest take no action. Absent while no such menu shows.
+///
+/// The `system-text-menu-` id prefix is reserved: a press on any id that
+/// starts with it goes to the menu, so an app must not give a node a
+/// `testID` that does.
 pub const TEXT_MENU_ID: &str = "system-text-menu";
 
 /// The `hello.features` entry of a host that reports the software keyboard
@@ -1477,6 +1482,8 @@ mod tests {
         text_menu: Option<nsh_agent_actions::TextMenu>,
         /// The text menu items the host was asked to press.
         menu_presses: Arc<std::sync::Mutex<Vec<String>>>,
+        /// Whether the clipboard holds a clip the agent set.
+        agent_clip: Option<bool>,
         /// Input 3's selection, as the platform holds it.
         selection: Option<(u32, u32)>,
         /// How many times the selections were read.
@@ -1495,6 +1502,7 @@ mod tests {
                 keyboard: Ok(None),
                 text_menu: None,
                 menu_presses: Arc::default(),
+                agent_clip: None,
                 selection: None,
                 selection_reads: Arc::default(),
             }
@@ -1529,6 +1537,10 @@ mod tests {
         fn press_text_menu_item(&self, word: &str) -> Result<(), String> {
             self.menu_presses.lock().unwrap().push(word.to_owned());
             Ok(())
+        }
+
+        fn clipboard_set_by_agent(&self) -> Option<bool> {
+            self.agent_clip
         }
 
         fn input_selections(&self, ids: &[NodeId]) -> HashMap<NodeId, (u32, u32)> {
@@ -1814,6 +1826,54 @@ mod tests {
             assert!(!error.is_empty(), "{target}");
         }
         assert_eq!(*pressed.lock().unwrap(), ["copy"]);
+    }
+
+    #[test]
+    fn paste_through_the_menu_needs_a_clip_this_run_set() {
+        // A foreign clip, one the platform cannot vouch for, and this run's.
+        for (agent_clip, pastes) in [(Some(false), false), (None, false), (Some(true), true)] {
+            let mut native = SnapshotNative::new(true, None, false);
+            native.text_menu = nsh_agent_actions::TextMenu::from_strings(
+                &["insertion", "3", "paste", "select-all"].map(String::from),
+            );
+            native.agent_clip = agent_clip;
+            let pressed = native.menu_presses.clone();
+            let mut host = snapshot_host_with_native(
+                SnapshotScene(Ok(sample_nodes()), 1, Default::default()),
+                native,
+            );
+            let result = host.dispatch(&Op::click("system-text-menu-paste"));
+            if pastes {
+                result.unwrap();
+                assert_eq!(*pressed.lock().unwrap(), ["paste"]);
+            } else {
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("clipboard was not set by this run"),
+                    "{agent_clip:?}: {error}"
+                );
+                assert!(pressed.lock().unwrap().is_empty(), "{agent_clip:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn copy_through_the_menu_does_not_ask_whose_clip_it_is() {
+        // Copy and select-all write no foreign text into a field.
+        let mut native = SnapshotNative::new(true, None, false);
+        native.text_menu = nsh_agent_actions::TextMenu::from_strings(
+            &["selection", "3", "copy", "select-all"].map(String::from),
+        );
+        native.agent_clip = Some(false);
+        let pressed = native.menu_presses.clone();
+        let mut host = snapshot_host_with_native(
+            SnapshotScene(Ok(sample_nodes()), 1, Default::default()),
+            native,
+        );
+        host.dispatch(&Op::click("system-text-menu-copy")).unwrap();
+        host.dispatch(&Op::click("system-text-menu-select-all"))
+            .unwrap();
+        assert_eq!(*pressed.lock().unwrap(), ["copy", "select-all"]);
     }
 
     #[test]

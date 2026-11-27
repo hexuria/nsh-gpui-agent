@@ -324,6 +324,14 @@ pub trait StrictNative: Native {
         Err("this platform cannot press its text menu".into())
     }
 
+    /// Whether the clipboard holds a clip this run of the agent put there
+    /// (Cut or Copy it pressed, a paste it made): `None` when the platform
+    /// cannot tell. A Paste the agent presses needs `Some(true)`, so it never
+    /// inserts what a person or another app copied.
+    fn clipboard_set_by_agent(&self) -> Option<bool> {
+        None
+    }
+
     /// The selections of inputs `ids` as the platform holds them, read in
     /// one go (a snapshot asks for every input at once, so a host whose
     /// views live on another thread pays one hop, not one per field). Each
@@ -815,6 +823,16 @@ impl Agent {
                     menu.items.join(", ")
                 }
             ));
+        }
+        // The device's clipboard holds whatever a person or another app
+        // copied (codes, passwords, addresses), and a pasted field is read
+        // back unmasked into proof: only a clip this run set is pasted.
+        if word == "paste" && self.native.clipboard_set_by_agent() != Some(true) {
+            return Err(
+                "the clipboard was not set by this run: Paste would put in what a person or \
+                 another app copied (cut or copy through the text menu first)"
+                    .into(),
+            );
         }
         self.native.press_text_menu_item(word)?;
         self.settled()

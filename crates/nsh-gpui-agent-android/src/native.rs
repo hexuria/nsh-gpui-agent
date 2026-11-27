@@ -69,6 +69,28 @@ impl AndroidStrictNative {
 
     /// Calls a bridge method returning a Java float array with only the
     /// view as its argument.
+    /// Why an acting bridge call that answered nothing failed, when the
+    /// main thread is to blame: withdrawn before it ran (`mailbox_full`, so
+    /// not delivered), or still running (delivery uncertain). Asked on the
+    /// same thread right after the call.
+    fn main_failure(&self, action: &str) -> Option<String> {
+        let state: i32 = self.call(|env, class, _| {
+            env.call_static_method(class, "takeMainState", "()I", &[])?
+                .i()
+        });
+        match state {
+            1 => Some(format!(
+                "mailbox_full: the Android main thread did not take the {action} within 10 s; \
+                 it was withdrawn and does not run"
+            )),
+            2 => Some(format!(
+                "the Android main thread did not finish the {action} in time: it may still \
+                 happen (delivery uncertain)"
+            )),
+            _ => None,
+        }
+    }
+
     fn floats(&self, method: &str) -> Option<Vec<f32>> {
         self.call(|env, class, view| {
             let array = env
@@ -164,9 +186,12 @@ impl Native for AndroidStrictNative {
             )?
             .z()
         });
-        delivered
-            .then_some(())
-            .ok_or_else(|| "Android hover dispatch failed".into())
+        if delivered {
+            return Ok(());
+        }
+        Err(self
+            .main_failure("hover")
+            .unwrap_or_else(|| "Android hover dispatch failed".into()))
     }
 
     fn right_click(&self, at: Point<Points>) -> Result<(), String> {
@@ -201,8 +226,12 @@ impl Native for AndroidStrictNative {
             )?
             .z()
         });
-        done.then_some(())
-            .ok_or_else(|| "Android paste dispatch failed".into())
+        if done {
+            return Ok(());
+        }
+        Err(self
+            .main_failure("paste")
+            .unwrap_or_else(|| "Android paste dispatch failed".into()))
     }
 
     fn compose(&self, text: &str) -> Result<(), String> {
@@ -299,7 +328,9 @@ impl Native for AndroidStrictNative {
             .z()
         });
         if !resized {
-            return Err("requested viewport does not fit the Android window".into());
+            return Err(self
+                .main_failure("resize")
+                .unwrap_or_else(|| "requested viewport does not fit the Android window".into()));
         }
         for _ in 0..50 {
             let actual = self.viewport();
@@ -380,9 +411,12 @@ impl StrictNative for AndroidStrictNative {
             )?
             .z()
         });
-        focused
-            .then_some(())
-            .ok_or_else(|| "native focus is only supported for an editable input".to_string())
+        if focused {
+            return Ok(());
+        }
+        Err(self
+            .main_failure("focus")
+            .unwrap_or_else(|| "native focus is only supported for an editable input".to_string()))
     }
 
     fn app_focused(&self) -> bool {
@@ -410,8 +444,12 @@ impl StrictNative for AndroidStrictNative {
             )?
             .z()
         });
-        done.then_some(())
-            .ok_or_else(|| "Android could not change the requested orientation".into())
+        if done {
+            return Ok(());
+        }
+        Err(self
+            .main_failure("rotation")
+            .unwrap_or_else(|| "Android could not change the requested orientation".into()))
     }
 
     fn input_selections(&self, asked: &[NodeId]) -> std::collections::HashMap<NodeId, (u32, u32)> {
@@ -475,6 +513,23 @@ impl StrictNative for AndroidStrictNative {
         TextMenu::from_strings(&values)
     }
 
+    fn clipboard_set_by_agent(&self) -> Option<bool> {
+        let owned: i32 = self.call(|env, class, view| {
+            env.call_static_method(
+                class,
+                "clipboardSetByAgent",
+                "(Landroid/view/View;)I",
+                &[JValue::Object(view)],
+            )?
+            .i()
+        });
+        match owned {
+            1 => Some(true),
+            0 => Some(false),
+            _ => None,
+        }
+    }
+
     fn press_text_menu_item(&self, word: &str) -> Result<(), String> {
         let refused: Option<String> = self.call(|env, class, view| {
             let word = env.new_string(word)?;
@@ -531,6 +586,9 @@ impl StrictNative for AndroidStrictNative {
             .z()
         });
         if !done {
+            if let Some(why) = self.main_failure("keyboard change") {
+                return Err(why);
+            }
             return if shown {
                 Err("no input has the focus".into())
             } else {

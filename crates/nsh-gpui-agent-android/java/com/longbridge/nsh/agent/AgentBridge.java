@@ -37,6 +37,7 @@ import java.util.Arrays;
 import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /** The Android surface operations the agent adds, reached through reflection. */
 public final class AgentBridge {
@@ -45,6 +46,13 @@ public final class AgentBridge {
     static final int HIT_FAILED = Integer.MIN_VALUE;
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    /**
+     * The label of every clip this agent puts on the clipboard, with a token of this
+     * process: a Paste the agent presses inserts only a clip this run set, never what a
+     * person or another app copied (codes, passwords, addresses), which would then be read
+     * back unmasked into proof.
+     */
+    static final String CLIP_LABEL = "nsh-agent:" + java.util.UUID.randomUUID();
     private static String agentToken;
 
     private static volatile boolean reflectionReady;
@@ -238,11 +246,45 @@ public final class AgentBridge {
             MenuItem item = menu.getMenu().findItem(id);
             if (item == null || !item.isVisible()) return "the text menu has no `" + word + "`";
             if (!item.isEnabled()) return "`" + word + "` is disabled in the text menu";
-            return menu.getMenu().performIdentifierAction(id, 0)
-                    ? ""
-                    : "the text menu did not take `" + word + "`";
+            ClipboardManager clipboard = (ClipboardManager)
+                    host.getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+            if (id == android.R.id.paste && !agentClip(clipboard)) {
+                return "the clipboard was not set by this run: Paste would put in what a person or "
+                        + "another app copied";
+            }
+            if (!menu.getMenu().performIdentifierAction(id, 0)) {
+                return "the text menu did not take `" + word + "`";
+            }
+            // What Cut or Copy just put there is this run's clip: labelled so, a
+            // Paste after it is allowed.
+            if ((id == android.R.id.cut || id == android.R.id.copy) && clipboard != null) {
+                ClipData clip = clipboard.getPrimaryClip();
+                if (clip != null && clip.getItemCount() > 0) {
+                    CharSequence text = clip.getItemAt(0).coerceToText(host.getContext());
+                    clipboard.setPrimaryClip(ClipData.newPlainText(CLIP_LABEL, text));
+                }
+            }
+            return "";
         });
-        return refused == null ? "the main thread did not answer" : refused;
+        return refused == null ? mainFailure("press of `" + word + "`") : refused;
+    }
+
+    /** Whether the clipboard's clip is one this run put there ({@link #CLIP_LABEL}). */
+    private static boolean agentClip(ClipboardManager clipboard) {
+        if (clipboard == null || !clipboard.hasPrimaryClip()) return false;
+        android.content.ClipDescription description = clipboard.getPrimaryClipDescription();
+        CharSequence label = description == null ? null : description.getLabel();
+        return label != null && CLIP_LABEL.contentEquals(label);
+    }
+
+    /** {@code 1} when the clipboard holds a clip this run set, {@code 0} when it holds none or another's, {@code -1} when it cannot be told. */
+    public static int clipboardSetByAgent(View host) {
+        Integer owned = onMain(() -> {
+            ClipboardManager clipboard = (ClipboardManager)
+                    host.getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+            return agentClip(clipboard) ? 1 : 0;
+        });
+        return owned == null ? -1 : owned;
     }
 
     /** The android.R.id of a pressable menu word; 0 for any other word. */
@@ -526,7 +568,7 @@ public final class AgentBridge {
             if (clipboard == null) return false;
             ClipData previous = clipboard.getPrimaryClip();
             try {
-                clipboard.setPrimaryClip(ClipData.newPlainText("text", text));
+                clipboard.setPrimaryClip(ClipData.newPlainText(CLIP_LABEL, text));
                 return ((EditText) focus).onTextContextMenuItem(android.R.id.paste);
             } finally {
                 if (previous == null && Build.VERSION.SDK_INT >= 28) clipboard.clearPrimaryClip();
@@ -643,6 +685,7 @@ public final class AgentBridge {
 
     /** {@code call} on the main thread, waited for (10 s at most). */
     private static <T> T onMain(Callable<T> call) {
+        MAIN_STATE.get()[0] = MAIN_ANSWERED;
         // Already on the main thread: posting and waiting would wait on
         // ourselves until the timeout.
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -657,9 +700,61 @@ public final class AgentBridge {
         MAIN.post(task);
         try {
             return task.get(10, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            // Never left queued to run after the caller was told it failed (a
+            // retried paste would paste twice): withdrawn while it has not
+            // started, else waited for, since a started call runs to its end.
+            if (task.cancel(false)) {
+                MAIN.removeCallbacks(task);
+                MAIN_STATE.get()[0] = MAIN_WITHDRAWN;
+                Log.w("nsh", "test agent: the main thread did not take a call in 10 s; withdrawn");
+                return null;
+            }
+            try {
+                return task.get(10, TimeUnit.SECONDS);
+            } catch (Exception again) {
+                MAIN_STATE.get()[0] = MAIN_UNCERTAIN;
+                Log.w("nsh", "test agent: a main-thread call is still running after 20 s: " + again);
+                return null;
+            }
         } catch (Exception e) {
             Log.w("nsh", "test agent: " + e);
             return null;
+        }
+    }
+
+    /** How the calling thread's last {@link #onMain} call ended: answered, withdrawn before it ran, or still running. */
+    private static final int MAIN_ANSWERED = 0, MAIN_WITHDRAWN = 1, MAIN_UNCERTAIN = 2;
+    private static final ThreadLocal<int[]> MAIN_STATE = new ThreadLocal<int[]>() {
+        @Override
+        protected int[] initialValue() {
+            return new int[1];
+        }
+    };
+
+    /**
+     * How the calling thread's last main-thread call ended ({@code 0} answered, {@code 1}
+     * withdrawn before it ran, {@code 2} may still be running), and forgets it: the driver
+     * asks after a call that acts and failed, to say whether it happened.
+     */
+    public static int takeMainState() {
+        int[] state = MAIN_STATE.get();
+        int last = state[0];
+        state[0] = MAIN_ANSWERED;
+        return last;
+    }
+
+    /** Why an acting call that answered nothing failed, for the driver's reply. */
+    private static String mainFailure(String action) {
+        switch (takeMainState()) {
+            case MAIN_WITHDRAWN:
+                return "mailbox_full: the Android main thread did not take the " + action
+                        + " within 10 s; it was withdrawn and does not run";
+            case MAIN_UNCERTAIN:
+                return "the Android main thread did not finish the " + action
+                        + " in time: it may still happen (delivery uncertain)";
+            default:
+                return "the " + action + " failed on the Android main thread";
         }
     }
 
