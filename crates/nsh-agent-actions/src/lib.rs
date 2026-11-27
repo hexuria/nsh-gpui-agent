@@ -479,6 +479,19 @@ fn normalize_chord(chord: &str) -> Vec<String> {
     parts
 }
 
+/// The view a press on `occluder` goes to, for naming it in an
+/// `occluded_by` refusal: the occluder itself when it is an input or
+/// pressable, else its nearest pressable ancestor (an icon in a button
+/// names the button), else the occluder when nothing takes the press there
+/// or the tree does not know it.
+pub fn occluder_press_owner(nodes: &[SemanticNode], occluder: NodeId) -> NodeId {
+    nodes
+        .iter()
+        .find(|node| node.id == occluder)
+        .and_then(|node| press_owner(nodes, node))
+        .unwrap_or(occluder)
+}
+
 /// The window point `within` names in a node whose native frame is
 /// `bounds`: `within` is from the frame's top-left corner, in points, and
 /// must fall inside the frame.
@@ -528,6 +541,13 @@ fn press_owner(nodes: &[SemanticNode], target: &SemanticNode) -> Option<NodeId> 
         parent = ancestor.parent;
     }
     None
+}
+
+/// Whether node `id` is a masked input (a password, a PIN).
+fn is_masked(nodes: &[SemanticNode], id: NodeId) -> bool {
+    nodes
+        .iter()
+        .any(|node| node.id == id && node.states.iter().any(|state| state == "masked"))
 }
 
 /// The part of `text` from UTF-16 offset `start` to `end` (a platform's
@@ -935,6 +955,18 @@ impl Agent {
                 } else {
                     menu.items.join(", ")
                 }
+            ));
+        }
+        // Cut or Copy would make a masked field's text this run's clip (the
+        // platform may drop them from a password field; that is its grace,
+        // not a rule): refused on the field the menu is over, else the
+        // focused one.
+        if matches!(word, "cut" | "copy")
+            && let Some(field) = menu.field.or_else(|| self.native.focused())
+            && is_masked(&self.scene.semantic_tree()?, field)
+        {
+            return Err(format!(
+                "the field is masked: `{word}` would give its text away"
             ));
         }
         // The device's clipboard holds whatever a person or another app
@@ -1401,10 +1433,9 @@ impl Agent {
             ));
         }
         self.settled()?;
-        let node = self
-            .scene
-            .semantic_tree()?
-            .into_iter()
+        let nodes = self.scene.semantic_tree()?;
+        let node = nodes
+            .iter()
             .find(|node| node.id == id)
             .ok_or_else(|| format!("node {id} is offscreen or unavailable"))?;
         if !node.enabled {
@@ -1413,10 +1444,9 @@ impl Agent {
         // A masked field's text copied or cut would become this run's clip,
         // and a paste would then show it in a field read back unmasked.
         let copying = is_copy_chord(keys);
-        if copying && node.states.iter().any(|state| state == "masked") {
-            return Err(format!(
-                "the field is masked: `{keys}` would give its text away"
-            ));
+        let masked_refusal = || format!("the field is masked: `{keys}` would give its text away");
+        if copying && is_masked(&nodes, id) {
+            return Err(masked_refusal());
         }
         self.native.validate_keys(keys)?;
         // A focused input takes the keys where it is (see `type_node`).
@@ -1429,6 +1459,17 @@ impl Agent {
                     return Err(error);
                 }
             }
+        }
+        // The keys go to the focused view, which a press on a label or a
+        // container (a no-op focus) leaves where it was: a masked field
+        // that keeps the focus is refused as the target would be.
+        if copying
+            && self
+                .native
+                .focused()
+                .is_some_and(|focused| is_masked(&nodes, focused))
+        {
+            return Err(masked_refusal());
         }
         // A copy or cut this agent presses makes the clip it writes this
         // run's: the generation it moved the clipboard to, if it moved it

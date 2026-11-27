@@ -374,7 +374,12 @@ impl AgentHost for NshAgentHost {
     fn dispatch(&mut self, op: &Op) -> Result<DispatchResult, String> {
         self.require_available()?;
         let _ = self.agent.take_native_failure();
-        let result = self.dispatch_available(op);
+        let result =
+            self.dispatch_available(op)
+                .map_err(|error| match self.agent.semantic_nodes() {
+                    Ok(nodes) => name_occluder(error, &nodes),
+                    Err(_) => error,
+                });
         if let Some(failure) = self.agent.take_native_failure() {
             return Err(failure);
         }
@@ -701,6 +706,30 @@ fn optional_point(args: &serde_json::Value) -> Result<Option<Point<Points>>, Str
         ))),
         _ => Err("invoke coordinates require both x and y".into()),
     }
+}
+
+/// An `occluded_by: <id>` refusal with the occluder named as a snapshot
+/// names it, and by the view a press there goes to: `occluded_by: pill (its
+/// n6)` when node 6 is an icon in the pressable `pill`. Any other error, or
+/// an occluder the tree does not know, is returned as it is.
+fn name_occluder(error: String, nodes: &[SemanticNode]) -> String {
+    let Some(rest) = error.strip_prefix("occluded_by: ") else {
+        return error;
+    };
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let Ok(hit) = rest[..digits].parse::<NodeId>() else {
+        return error;
+    };
+    let ids = stable_ids(nodes);
+    let Some(leaf) = ids.get(&hit) else {
+        return error;
+    };
+    let owner = nsh_agent_actions::occluder_press_owner(nodes, hit);
+    let named = match ids.get(&owner) {
+        Some(owner_id) if owner != hit => format!("{owner_id} (its {leaf})"),
+        _ => leaf.clone(),
+    };
+    format!("occluded_by: {named}{}", &rest[digits..])
 }
 
 fn stable_ids(nodes: &[SemanticNode]) -> HashMap<NodeId, String> {
@@ -1543,6 +1572,8 @@ mod tests {
         /// Whether the clipboard's text is the one asked, as the platform
         /// compares it.
         clip_text_is: Option<bool>,
+        /// The view the platform says has the focus.
+        focused: Option<NodeId>,
         /// The keystrokes pressed.
         keys: Arc<std::sync::Mutex<Vec<String>>>,
         /// Input 3's selection, as the platform holds it.
@@ -1567,6 +1598,7 @@ mod tests {
                 generation: None,
                 copies: true,
                 clip_text_is: None,
+                focused: None,
                 keys: Arc::default(),
                 selection: None,
                 selection_reads: Arc::default(),
@@ -1674,6 +1706,9 @@ mod tests {
 
         fn type_text(&self, _: &str) {}
         fn key(&self, _: nsh_testing::agent::Key) {}
+        fn focused(&self) -> Option<NodeId> {
+            self.focused
+        }
         fn input_text(&self, id: NodeId) -> Option<String> {
             (id == 3).then(|| self.input.clone()).flatten()
         }
@@ -2123,6 +2158,64 @@ mod tests {
         });
         host.dispatch(&Op::key("visible", "Tab")).unwrap();
         assert_eq!(*keys.lock().unwrap(), ["Tab"]);
+    }
+
+    #[test]
+    fn a_copy_chord_is_refused_while_a_masked_field_keeps_the_focus() {
+        // The target (node 3) is no masked field, but focusing it leaves the
+        // focus on the masked node 2, where the keys would go.
+        let mut nodes = sample_nodes();
+        nodes[1].input = true;
+        nodes[1].states.push("masked".into());
+        nodes[2].role = "textbox".into();
+        nodes[2].input = true;
+        nodes[2].enabled = true;
+        let mut native = SnapshotNative::new(true, Some(String::new()), false);
+        native.generation = Some(Arc::new(std::sync::atomic::AtomicU64::new(5)));
+        native.focused = Some(2);
+        let keys = native.keys.clone();
+        let mut host =
+            snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);
+        for chord in ["mod+c", "ctrl+x"] {
+            let reply = format!("{:?}", host.dispatch(&Op::key("visible", chord)));
+            assert!(reply.contains("the field is masked"), "{chord}: {reply}");
+        }
+        assert!(keys.lock().unwrap().is_empty());
+        // Other keys still go.
+        host.dispatch(&Op::key("visible", "Tab")).unwrap();
+        assert_eq!(*keys.lock().unwrap(), ["Tab"]);
+    }
+
+    #[test]
+    fn the_text_menus_cut_and_copy_are_refused_over_a_masked_field() {
+        for (field, focused) in [("3", None), ("", Some(3))] {
+            let mut nodes = sample_nodes();
+            nodes[2].input = true;
+            nodes[2].states.push("masked".into());
+            let mut native = SnapshotNative::new(true, None, false);
+            // An empty field slot: a menu that does not say its field, so
+            // the focused one counts.
+            native.text_menu = nsh_agent_actions::TextMenu::from_strings(
+                &["selection", field, "cut", "copy", "select-all"].map(String::from),
+            );
+            native.focused = focused;
+            let pressed = native.menu_presses.clone();
+            let mut host =
+                snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);
+            for word in ["cut", "copy"] {
+                let reply = format!(
+                    "{:?}",
+                    host.dispatch(&Op::click(&format!("system-text-menu-{word}")))
+                );
+                assert!(
+                    reply.contains("the field is masked"),
+                    "{field} {word}: {reply}"
+                );
+            }
+            host.dispatch(&Op::click("system-text-menu-select-all"))
+                .unwrap();
+            assert_eq!(*pressed.lock().unwrap(), ["select-all"], "{field}");
+        }
     }
 
     /// A field holding "123456789" with its whole text selected, whose
@@ -2617,6 +2710,37 @@ mod tests {
         assert_eq!(snapshot.nodes[0].checked, None);
         assert_eq!(snapshot.nodes[0].children[0].checked, Some(false));
         assert_eq!(snapshot.nodes[0].children[1].checked, Some(true));
+    }
+
+    #[test]
+    fn an_occluder_is_named_by_the_view_a_press_there_goes_to() {
+        // A pressable pill (5) whose icon (6) has no test id; a plain
+        // overlay (7) that nothing presses through.
+        let mut nodes = sample_nodes();
+        let mut pill = SemanticNode::default();
+        pill.id = 5;
+        pill.parent = Some(1);
+        pill.test_id = Some("pill".into());
+        pill.pressable = true;
+        let mut icon = SemanticNode::default();
+        icon.id = 6;
+        icon.parent = Some(5);
+        let mut overlay = SemanticNode::default();
+        overlay.id = 7;
+        overlay.parent = Some(1);
+        nodes.extend([pill, icon, overlay]);
+
+        let named = |error: &str| name_occluder(error.to_owned(), &nodes);
+        assert_eq!(named("occluded_by: 6"), "occluded_by: pill (its n6)");
+        assert_eq!(named("occluded_by: 5"), "occluded_by: pill");
+        assert_eq!(named("occluded_by: 7"), "occluded_by: n7");
+        assert_eq!(named("occluded_by: 3"), "occluded_by: visible");
+        // A view the tree does not know, other refusals and the keyboard's
+        // stay as they are.
+        assert_eq!(named("occluded_by: 99"), "occluded_by: 99");
+        assert_eq!(named("`x` is offscreen"), "`x` is offscreen");
+        let keyboard = "occluded_by: software keyboard (a press lands on a key)";
+        assert_eq!(named(keyboard), keyboard);
     }
 
     #[test]
