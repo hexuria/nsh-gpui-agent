@@ -117,6 +117,10 @@ pub struct SemanticNode {
     pub grouped: bool,
     /// Whether this node clips its descendants.
     pub clipping: bool,
+    /// Whether this node is a modal presentation's native root. A modal is
+    /// painted as a layer of its own, not inside its logical parent's box.
+    #[serde(default)]
+    pub modal: bool,
     /// Whether this node is a text input.
     pub input: bool,
     /// Whether this node scrolls its contents.
@@ -1202,7 +1206,7 @@ impl Agent {
         else {
             return Err(error);
         };
-        let mut parent = node.parent;
+        let mut parent = if node.modal { None } else { node.parent };
         while let Some(ancestor) = parent.and_then(|parent| by_id.get(&parent)) {
             if ancestor.clipping {
                 let Some(clipped) = self
@@ -1213,6 +1217,9 @@ impl Agent {
                     return Err(error);
                 };
                 visible = clipped;
+            }
+            if ancestor.modal {
+                break;
             }
             parent = ancestor.parent;
         }
@@ -2225,7 +2232,9 @@ impl Agent {
         visible = intersection(visible, geometry.bounds)
             .ok_or_else(|| format!("`{selector}` is offscreen"))?;
         let owner_node = by_id.get(&native_owner).copied().unwrap_or(target);
-        let mut parent = if geometry.synthetic {
+        let mut parent = if target.modal {
+            None
+        } else if geometry.synthetic {
             Some(native_owner)
         } else {
             owner_node.parent
@@ -2240,6 +2249,9 @@ impl Agent {
                 })?;
                 visible = intersection(visible, ancestor_bounds)
                     .ok_or_else(|| format!("`{selector}` is offscreen"))?;
+            }
+            if ancestor.modal {
+                break;
             }
             parent = ancestor.parent;
         }
