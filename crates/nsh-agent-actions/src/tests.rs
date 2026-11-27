@@ -2077,6 +2077,60 @@ fn synthetic_canvas_targets_fail_closed_when_disabled_clipped_or_foreign_hit() {
 }
 
 #[test]
+fn modal_contents_ignore_logical_host_clip_but_keep_overlay_scroll_clip() {
+    let rect = |x, y, width, height| {
+        Bounds::new(
+            point(px(x), px(y)),
+            Size::new(Points(width), Points(height)),
+        )
+    };
+    let mut host = semantic_node(2, Some(1), false, SemanticTarget::View);
+    host.clipping = true;
+    let mut modal = semantic_node(3, Some(2), false, SemanticTarget::View);
+    modal.modal = true;
+    let mut scroll = semantic_node(5, Some(3), false, SemanticTarget::View);
+    scroll.clipping = true;
+    scroll.scroll = true;
+    let nodes = vec![
+        semantic_node(1, None, false, SemanticTarget::View),
+        host,
+        modal,
+        semantic_node(4, Some(3), true, SemanticTarget::View),
+        scroll,
+        semantic_node(6, Some(5), true, SemanticTarget::View),
+    ];
+    let bounds = [
+        (1, rect(0.0, 0.0, 100.0, 100.0)),
+        (2, rect(0.0, 90.0, 100.0, 0.0)),
+        (3, rect(0.0, 0.0, 100.0, 100.0)),
+        (4, rect(10.0, 40.0, 20.0, 20.0)),
+        (5, rect(0.0, 0.0, 100.0, 20.0)),
+        (6, rect(10.0, 80.0, 20.0, 10.0)),
+    ];
+    let presses = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let agent = Agent::requiring_native_hit_test(
+        target_scene(nodes),
+        Box::new(GateNative {
+            windows: None,
+            bounds: bounds.into(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(4)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: presses.clone(),
+            pressed_at: Arc::new(Mutex::new(Vec::new())),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: Size::new(px(100.0), px(100.0)),
+        }),
+    );
+
+    agent.press_node(4).unwrap();
+    assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert!(agent.press_node(6).unwrap_err().contains("offscreen"));
+    assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[test]
 fn disabled_press_and_type_fail_before_native_hit_or_input() {
     use nsh_core::{ViewKind, geometry::Size};
 
