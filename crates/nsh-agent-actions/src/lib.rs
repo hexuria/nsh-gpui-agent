@@ -347,6 +347,17 @@ pub trait StrictNative: Native {
         None
     }
 
+    /// Whether the clipboard's text is `text`, compared inside the
+    /// platform: the clip itself never comes back to the agent. `None`
+    /// when the platform cannot tell. A copy or cut chord's clip counts as
+    /// this run's only when it is the text the field had selected, so a
+    /// write by someone else between the chord and the generation read is
+    /// not taken for the agent's ([`Agent::clipboard_owned`]).
+    fn clipboard_text_is(&self, text: &str) -> Option<bool> {
+        let _ = text;
+        None
+    }
+
     /// The selections of inputs `ids` as the platform holds them, read in
     /// one go (a snapshot asks for every input at once, so a host whose
     /// views live on another thread pays one hop, not one per field). Each
@@ -470,9 +481,14 @@ fn normalize_chord(chord: &str) -> Vec<String> {
 
 /// What a press on `target` goes to: itself when it is an input or
 /// pressable, else its nearest pressable ancestor (`None`: nothing takes it).
+/// The walk ends at a modal's root: a modal is a layer of its own, so a
+/// press inside it never goes to a pressable view its logical parent is in.
 fn press_owner(nodes: &[SemanticNode], target: &SemanticNode) -> Option<NodeId> {
     if target.input || target.pressable {
         return Some(target.id);
+    }
+    if target.modal {
+        return None;
     }
     let mut parent = target.parent;
     while let Some(parent_id) = parent {
@@ -480,9 +496,20 @@ fn press_owner(nodes: &[SemanticNode], target: &SemanticNode) -> Option<NodeId> 
         if ancestor.pressable {
             return Some(ancestor.id);
         }
+        if ancestor.modal {
+            return None;
+        }
         parent = ancestor.parent;
     }
     None
+}
+
+/// The part of `text` from UTF-16 offset `start` to `end` (a platform's
+/// selection), or `None` when the offsets do not fit it.
+fn utf16_slice(text: &str, start: u32, end: u32) -> Option<String> {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let part = units.get(start as usize..end as usize)?;
+    String::from_utf16(part).ok()
 }
 
 /// Every mounted view's parent the semantic tree knows: its nodes', and
@@ -1336,6 +1363,14 @@ impl Agent {
         if !node.enabled {
             return Err(format!("node {id} is disabled"));
         }
+        // A masked field's text copied or cut would become this run's clip,
+        // and a paste would then show it in a field read back unmasked.
+        let copying = is_copy_chord(keys);
+        if copying && node.states.iter().any(|state| state == "masked") {
+            return Err(format!(
+                "the field is masked: `{keys}` would give its text away"
+            ));
+        }
         self.native.validate_keys(keys)?;
         // A focused input takes the keys where it is (see `type_node`).
         if !(node.input && self.native.focused() == Some(id)) {
@@ -1351,13 +1386,35 @@ impl Agent {
         // A copy or cut this agent presses makes the clip it writes this
         // run's: the generation it moved the clipboard to, if it moved it
         // (with nothing selected it writes nothing, and a clip already
-        // there stays another's).
-        let copying = is_copy_chord(keys);
+        // there stays another's). Where the platform knows the field's
+        // selection and can compare the clip, the clip must also be the
+        // text that was selected: an empty selection copies nothing, and a
+        // different text is someone else's write.
         let before = copying
             .then(|| self.native.clipboard_generation())
             .flatten();
+        let selected = if before.is_some() && node.input {
+            self.native
+                .input_selections(&[id])
+                .get(&id)
+                .map(|&(start, end)| {
+                    node.value
+                        .as_deref()
+                        .and_then(|value| utf16_slice(value, start, end))
+                })
+        } else {
+            None
+        };
         self.native.press_keys(keys)?;
+        let clip_is_selection = match selected {
+            None => true,
+            Some(None) => false,
+            Some(Some(text)) => {
+                !text.is_empty() && self.native.clipboard_text_is(&text) != Some(false)
+            }
+        };
         if copying
+            && clip_is_selection
             && let (Some(before), Some(after)) = (before, self.native.clipboard_generation())
             && after != before
         {
