@@ -307,6 +307,17 @@ pub trait StrictNative: Native {
     fn take_failure(&self) -> Option<String> {
         None
     }
+    /// The selections of inputs `ids` as the platform holds them, read in
+    /// one go (a snapshot asks for every input at once, so a host whose
+    /// views live on another thread pays one hop, not one per field). Each
+    /// is its start and end in UTF-16 code units, start first: the
+    /// direction a selection was made in is dropped, and a bare caret has
+    /// equal ends. An input the platform says nothing of (or an id that is
+    /// no input) is left out; the default says nothing of any.
+    fn input_selections(&self, ids: &[NodeId]) -> std::collections::HashMap<NodeId, (u32, u32)> {
+        let _ = ids;
+        std::collections::HashMap::new()
+    }
 }
 
 /// Whether `at` is inside `bounds` clear of its edges along the axis a
@@ -515,6 +526,41 @@ fn hold_reaches_through_own_input(
         })
 }
 
+/// The selections a host's bridge answered as flat `(id, start, end)`
+/// triples for the inputs `asked`. Strict, so a bridge fault never moves
+/// one field's selection onto another: anything but whole triples gives
+/// nothing at all, an id not asked for or answered twice is dropped (both
+/// copies of a duplicate), and so is a triple whose offsets are negative or
+/// whose end is before its start.
+pub fn selections_from_triples(
+    asked: &[NodeId],
+    values: &[i32],
+) -> std::collections::HashMap<NodeId, (u32, u32)> {
+    let mut out = std::collections::HashMap::new();
+    if !values.len().is_multiple_of(3) {
+        return out;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut twice = std::collections::HashSet::new();
+    for &[id, start, end] in values.as_chunks::<3>().0 {
+        let Ok(id) = NodeId::try_from(id) else {
+            continue;
+        };
+        if !asked.contains(&id) {
+            continue;
+        }
+        if !seen.insert(id) {
+            twice.insert(id);
+            continue;
+        }
+        if start >= 0 && end >= start {
+            out.insert(id, (start as u32, end as u32));
+        }
+    }
+    out.retain(|id, _| !twice.contains(id));
+    out
+}
+
 /// Acts on a host's app through its [`SemanticScene`] and [`StrictNative`].
 pub struct Agent {
     scene: std::sync::Arc<dyn SemanticScene>,
@@ -660,6 +706,15 @@ impl Agent {
     /// Current native input value for `id`.
     pub fn native_input_text(&self, id: NodeId) -> Option<String> {
         self.native.input_text(id)
+    }
+
+    /// The selections of inputs `ids` as the platform holds them
+    /// ([`StrictNative::input_selections`]).
+    pub fn native_input_selections(
+        &self,
+        ids: &[NodeId],
+    ) -> std::collections::HashMap<NodeId, (u32, u32)> {
+        self.native.input_selections(ids)
     }
 
     fn target_geometry(&self, node: &SemanticNode) -> Option<TargetGeometry> {

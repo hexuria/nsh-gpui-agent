@@ -3435,3 +3435,32 @@ fn a_hold_within_a_node_refuses_a_point_scrolled_off_the_window() {
         vec![(point(px(30.0), px(60.0)), Duration::from_millis(600))]
     );
 }
+
+#[test]
+fn selections_from_triples_keeps_whole_asked_triples() {
+    let got = selections_from_triples(&[3, 7], &[3, 0, 9, 7, 2, 2]);
+    assert_eq!(got.get(&3), Some(&(0, 9)));
+    assert_eq!(got.get(&7), Some(&(2, 2)));
+    assert_eq!(got.len(), 2);
+}
+
+#[test]
+fn selections_from_triples_refuses_a_short_or_misaligned_answer() {
+    for values in [&[3, 0, 9, 7][..], &[3, 0, 9, 7, 2][..], &[3, 0][..]] {
+        assert!(
+            selections_from_triples(&[3, 7], values).is_empty(),
+            "{values:?}"
+        );
+    }
+}
+
+#[test]
+fn selections_from_triples_drops_unasked_duplicate_and_bad_ids() {
+    // 5 was not asked; 3 comes twice; 7 ends before it starts; -1 is no id.
+    let got = selections_from_triples(
+        &[3, 7, 8],
+        &[5, 0, 1, 3, 0, 9, 3, 1, 1, 7, 4, 2, -1, 0, 0, 8, 1, 4],
+    );
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got.get(&8), Some(&(1, 4)));
+}
