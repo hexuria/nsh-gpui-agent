@@ -465,19 +465,43 @@ fn is_descendant_or_same(
     false
 }
 
-/// Whether a hold whose `receivers` are only enabled inputs inside `target`
+/// How far, in points, a field's edges may lie from its box's and the field
+/// still cover the box (rounding of the two frames).
+const COVER_SLACK: f32 = 1.0;
+
+/// Whether `inner` covers `outer`: every edge within [`COVER_SLACK`].
+fn covers(inner: Bounds<Points>, outer: Bounds<Points>) -> bool {
+    let edges = |b: Bounds<Points>| {
+        [
+            b.origin.x.0,
+            b.origin.y.0,
+            b.origin.x.0 + b.size.width.0,
+            b.origin.y.0 + b.size.height.0,
+        ]
+    };
+    edges(inner)
+        .iter()
+        .zip(edges(outer))
+        .all(|(a, b)| (a - b).abs() <= COVER_SLACK)
+}
+
+/// Whether a hold whose `receivers` are only the target's own hidden field
 /// still reaches `target`: it does when `target` observes raw touches. The
-/// platform gives the hold to the input (its native text selection), while
+/// platform gives the hold to the field (its native text selection), while
 /// the touches still travel to every touch observer on their path, so a
-/// view whose own hidden field covers it (a one-time-code box) hears the
-/// held finger and can act on it. An input that is a sibling or an overlay
-/// is no part of the target, and a target that only has a long-press
-/// recognizer never hears a hold its input takes: both stay occluded.
+/// view covered by its own field (a one-time-code box) hears the held
+/// finger and can act on it. "Its own" is strict: an enabled input inside
+/// the target whose native frame covers the target's (`bounds`) within a
+/// point. A visible field somewhere inside a card, an input that is a
+/// sibling or an overlay, and a target that only has a long-press
+/// recognizer (it never hears a hold its input takes) all stay occluded.
 fn hold_reaches_through_own_input(
     target: &SemanticNode,
+    bounds: Bounds<Points>,
     receivers: &[NodeId],
     by_id: &std::collections::HashMap<NodeId, &SemanticNode>,
     parents: &std::collections::HashMap<NodeId, Option<NodeId>>,
+    native_bounds: impl Fn(NodeId) -> Option<Bounds<Points>>,
 ) -> bool {
     target.touch
         && !receivers.is_empty()
@@ -487,6 +511,7 @@ fn hold_reaches_through_own_input(
                     .get(&receiver)
                     .is_some_and(|node| node.input && node.enabled)
                 && is_descendant_or_same(receiver, target.id, parents)
+                && native_bounds(receiver).is_some_and(|field| covers(field, bounds))
         })
 }
 
@@ -2028,7 +2053,12 @@ impl Agent {
                                             && receivers.contains(&target.id))
                                         || (expected == target.id
                                             && hold_reaches_through_own_input(
-                                                target, &receivers, &by_id, &parents,
+                                                target,
+                                                geometry.bounds,
+                                                &receivers,
+                                                &by_id,
+                                                &parents,
+                                                |id| self.native.bounds(id),
                                             ))
                                 }
                             } else {
