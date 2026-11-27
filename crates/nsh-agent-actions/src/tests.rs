@@ -3410,28 +3410,28 @@ fn a_small_visible_field_inside_a_touch_observer_still_occludes_its_hold() {
 
 #[test]
 fn a_hold_within_a_node_refuses_a_point_scrolled_off_the_window() {
-    // The box runs from y 50 to 150 in a 100-point window: its lower half
-    // is off screen, though inside the node.
+    // The box runs from y 40 to 140 in a 100-point window: its middle (y
+    // 90) shows, its lower part is off screen, though inside the node.
     let long_presses = Arc::new(Mutex::new(Vec::new()));
     let agent = code_box_agent_at(
         code_box_scene(false, CodeCover::OwnInput),
         CodeCover::OwnInput,
-        point(px(20.0), px(50.0)),
+        point(px(20.0), px(40.0)),
         long_presses.clone(),
     );
 
     let error = agent
         .long_press_node_within(2, point(px(10.0), px(80.0)), None)
         .unwrap_err();
-    assert!(error.contains("offscreen"), "{error}");
+    assert!(error.contains("outside its visible area"), "{error}");
     assert!(long_presses.lock().unwrap().is_empty());
 
-    // Its upper half is still held where aimed.
+    // Its part on screen is still held where aimed.
     agent
         .long_press_node_within(2, point(px(10.0), px(20.0)), None)
         .unwrap();
     assert_eq!(
         *long_presses.lock().unwrap(),
-        vec![(point(px(30.0), px(70.0)), Duration::from_millis(600))]
+        vec![(point(px(30.0), px(60.0)), Duration::from_millis(600))]
     );
 }
