@@ -552,29 +552,25 @@ fn hold_reaches_through_own_input(
 }
 
 /// Whether `keys` (one keystroke in `nsh/keymap` notation, `mod+v`) is a
-/// paste chord on some platform: V with the command or control key (Shift
-/// or Alt besides, as paste-as-plain-text has), Shift+Insert, or a paste key
-/// of its own (Android's `KEYCODE_PASTE`, X11's `XF86Paste`). Case and the
-/// `+` / `-` separator do not matter.
+/// paste chord on some platform, read as the crate reads every chord
+/// ([`normalize_chord`]: `⌘`, `cmd`, `super`, `windows` are `meta`; `⌃`,
+/// `ctl`, `control` are `ctrl`; `⇧` is `shift`; `insert` is `ins`; any case,
+/// `+` or `-`): V with `meta`, `ctrl` or `mod` (Shift or Alt besides, as
+/// paste-as-plain-text has), Shift+Insert, or a paste key of its own
+/// (Android's `KEYCODE_PASTE`, X11's `XF86Paste`).
+///
+/// Only chords are gated. A desktop field's own context menu reached by a
+/// key sequence (the Menu key, then Paste) is no chord and is not gated; no
+/// recipe drives one.
 pub fn is_paste_chord(keys: &str) -> bool {
-    let lower = keys.trim().to_ascii_lowercase();
-    let parts: Vec<&str> = lower
-        .split(['+', '-'])
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect();
-    let Some((key, modifiers)) = parts.split_last() else {
-        return false;
-    };
-    let has = |names: &[&str]| modifiers.iter().any(|m| names.contains(m));
-    match *key {
-        "v" => has(&[
-            "mod", "cmd", "command", "meta", "super", "win", "ctrl", "control",
-        ]),
-        "insert" | "ins" => has(&["shift"]),
-        "paste" | "xf86paste" | "keycode_paste" => true,
-        _ => false,
-    }
+    let parts = normalize_chord(keys);
+    let has = |name: &str| parts.iter().any(|part| part == name);
+    let paste_key = parts
+        .iter()
+        .any(|part| matches!(part.as_str(), "paste" | "xf86paste" | "keycode_paste"));
+    paste_key
+        || (has("v") && (has("meta") || has("ctrl") || has("mod")))
+        || (has("ins") && has("shift"))
 }
 
 /// The platform's own text menu showing over an input, as read from the

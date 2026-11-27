@@ -1877,6 +1877,28 @@ mod tests {
     }
 
     #[test]
+    fn a_paste_chord_needs_a_clip_this_run_set() {
+        // A foreign clip and one the platform cannot vouch for: refused,
+        // whichever spelling; this run's own clip: not refused for that.
+        for (agent_clip, refused) in [(Some(false), true), (None, true), (Some(true), false)] {
+            for chord in ["mod+v", "⌘+v", "ctl+v", "⇧+insert"] {
+                let mut native = SnapshotNative::new(true, None, false);
+                native.agent_clip = agent_clip;
+                let mut host = snapshot_host_with_native(
+                    SnapshotScene(Ok(sample_nodes()), 1, Default::default()),
+                    native,
+                );
+                let reply = format!("{:?}", host.dispatch(&Op::key("visible", chord)));
+                assert_eq!(
+                    reply.contains("pastes the system clipboard"),
+                    refused,
+                    "{agent_clip:?} {chord}: {reply}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_press_on_a_text_menu_item_is_refused_while_no_menu_shows() {
         let native = SnapshotNative::new(true, None, false);
         let pressed = native.menu_presses.clone();

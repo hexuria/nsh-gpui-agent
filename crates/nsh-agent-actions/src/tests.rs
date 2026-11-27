@@ -3525,6 +3525,16 @@ fn paste_chords_are_known_on_every_platform() {
         "paste",
         "XF86Paste",
         "KEYCODE_PASTE",
+        // The crate's other spellings (normalize_chord).
+        "⌘+v",
+        "⌘-V",
+        "⌃+v",
+        "ctl+v",
+        "windows+v",
+        "super+v",
+        "win+v",
+        "⇧+insert",
+        "⇧+ins",
     ] {
         assert!(is_paste_chord(keys), "{keys}");
     }
