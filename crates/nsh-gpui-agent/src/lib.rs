@@ -331,7 +331,12 @@ impl AgentHost for NshAgentHost {
     fn dispatch(&mut self, op: &Op) -> Result<DispatchResult, String> {
         self.require_available()?;
         let _ = self.agent.take_native_failure();
-        let result = self.dispatch_available(op);
+        let result =
+            self.dispatch_available(op)
+                .map_err(|error| match self.agent.semantic_nodes() {
+                    Ok(nodes) => name_occluder(error, &nodes),
+                    Err(_) => error,
+                });
         if let Some(failure) = self.agent.take_native_failure() {
             return Err(failure);
         }
@@ -652,6 +657,30 @@ fn optional_point(args: &serde_json::Value) -> Result<Option<Point<Points>>, Str
         ))),
         _ => Err("invoke coordinates require both x and y".into()),
     }
+}
+
+/// An `occluded_by: <id>` refusal with the occluder named as a snapshot
+/// names it, and by the view a press there goes to: `occluded_by: pill (its
+/// n6)` when node 6 is an icon in the pressable `pill`. Any other error, or
+/// an occluder the tree does not know, is returned as it is.
+fn name_occluder(error: String, nodes: &[SemanticNode]) -> String {
+    let Some(rest) = error.strip_prefix("occluded_by: ") else {
+        return error;
+    };
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let Ok(hit) = rest[..digits].parse::<NodeId>() else {
+        return error;
+    };
+    let ids = stable_ids(nodes);
+    let Some(leaf) = ids.get(&hit) else {
+        return error;
+    };
+    let owner = nsh_agent_actions::occluder_press_owner(nodes, hit);
+    let named = match ids.get(&owner) {
+        Some(owner_id) if owner != hit => format!("{owner_id} (its {leaf})"),
+        _ => leaf.clone(),
+    };
+    format!("occluded_by: {named}{}", &rest[digits..])
 }
 
 fn stable_ids(nodes: &[SemanticNode]) -> HashMap<NodeId, String> {
@@ -2316,6 +2345,37 @@ mod tests {
         assert_eq!(snapshot.nodes[0].checked, None);
         assert_eq!(snapshot.nodes[0].children[0].checked, Some(false));
         assert_eq!(snapshot.nodes[0].children[1].checked, Some(true));
+    }
+
+    #[test]
+    fn an_occluder_is_named_by_the_view_a_press_there_goes_to() {
+        // A pressable pill (5) whose icon (6) has no test id; a plain
+        // overlay (7) that nothing presses through.
+        let mut nodes = sample_nodes();
+        let mut pill = SemanticNode::default();
+        pill.id = 5;
+        pill.parent = Some(1);
+        pill.test_id = Some("pill".into());
+        pill.pressable = true;
+        let mut icon = SemanticNode::default();
+        icon.id = 6;
+        icon.parent = Some(5);
+        let mut overlay = SemanticNode::default();
+        overlay.id = 7;
+        overlay.parent = Some(1);
+        nodes.extend([pill, icon, overlay]);
+
+        let named = |error: &str| name_occluder(error.to_owned(), &nodes);
+        assert_eq!(named("occluded_by: 6"), "occluded_by: pill (its n6)");
+        assert_eq!(named("occluded_by: 5"), "occluded_by: pill");
+        assert_eq!(named("occluded_by: 7"), "occluded_by: n7");
+        assert_eq!(named("occluded_by: 3"), "occluded_by: visible");
+        // A view the tree does not know, other refusals and the keyboard's
+        // stay as they are.
+        assert_eq!(named("occluded_by: 99"), "occluded_by: 99");
+        assert_eq!(named("`x` is offscreen"), "`x` is offscreen");
+        let keyboard = "occluded_by: software keyboard (a press lands on a key)";
+        assert_eq!(named(keyboard), keyboard);
     }
 
     #[test]

@@ -457,6 +457,19 @@ fn normalize_chord(chord: &str) -> Vec<String> {
     parts
 }
 
+/// The view a press on `occluder` goes to, for naming it in an
+/// `occluded_by` refusal: the occluder itself when it is an input or
+/// pressable, else its nearest pressable ancestor (an icon in a button
+/// names the button), else the occluder when nothing takes the press there
+/// or the tree does not know it.
+pub fn occluder_press_owner(nodes: &[SemanticNode], occluder: NodeId) -> NodeId {
+    nodes
+        .iter()
+        .find(|node| node.id == occluder)
+        .and_then(|node| press_owner(nodes, node))
+        .unwrap_or(occluder)
+}
+
 /// What a press on `target` goes to: itself when it is an input or
 /// pressable, else its nearest pressable ancestor (`None`: nothing takes it).
 fn press_owner(nodes: &[SemanticNode], target: &SemanticNode) -> Option<NodeId> {
