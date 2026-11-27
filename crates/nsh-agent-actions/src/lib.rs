@@ -336,6 +336,28 @@ pub trait StrictNative: Native {
         None
     }
 
+    /// A count the platform's clipboard moves on at every write, by anyone
+    /// (macOS and iOS: the pasteboard's `changeCount`; Windows:
+    /// `GetClipboardSequenceNumber`): `None` when the platform has none.
+    /// With it, a platform whose agent never writes the clipboard itself
+    /// still knows a clip as this run's: the one a copy or cut chord the
+    /// agent pressed wrote, as long as nothing wrote after it
+    /// ([`Agent::clipboard_owned`]).
+    fn clipboard_generation(&self) -> Option<u64> {
+        None
+    }
+
+    /// Whether the clipboard's text is `text`, compared inside the
+    /// platform: the clip itself never comes back to the agent. `None`
+    /// when the platform cannot tell. A copy or cut chord's clip counts as
+    /// this run's only when it is the text the field had selected, so a
+    /// write by someone else between the chord and the generation read is
+    /// not taken for the agent's ([`Agent::clipboard_owned`]).
+    fn clipboard_text_is(&self, text: &str) -> Option<bool> {
+        let _ = text;
+        None
+    }
+
     /// The selections of inputs `ids` as the platform holds them, read in
     /// one go (a snapshot asks for every input at once, so a host whose
     /// views live on another thread pays one hop, not one per field). Each
@@ -472,9 +494,14 @@ pub fn occluder_press_owner(nodes: &[SemanticNode], occluder: NodeId) -> NodeId 
 
 /// What a press on `target` goes to: itself when it is an input or
 /// pressable, else its nearest pressable ancestor (`None`: nothing takes it).
+/// The walk ends at a modal's root: a modal is a layer of its own, so a
+/// press inside it never goes to a pressable view its logical parent is in.
 fn press_owner(nodes: &[SemanticNode], target: &SemanticNode) -> Option<NodeId> {
     if target.input || target.pressable {
         return Some(target.id);
+    }
+    if target.modal {
+        return None;
     }
     let mut parent = target.parent;
     while let Some(parent_id) = parent {
@@ -482,9 +509,20 @@ fn press_owner(nodes: &[SemanticNode], target: &SemanticNode) -> Option<NodeId> 
         if ancestor.pressable {
             return Some(ancestor.id);
         }
+        if ancestor.modal {
+            return None;
+        }
         parent = ancestor.parent;
     }
     None
+}
+
+/// The part of `text` from UTF-16 offset `start` to `end` (a platform's
+/// selection), or `None` when the offsets do not fit it.
+fn utf16_slice(text: &str, start: u32, end: u32) -> Option<String> {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let part = units.get(start as usize..end as usize)?;
+    String::from_utf16(part).ok()
 }
 
 /// Every mounted view's parent the semantic tree knows: its nodes', and
@@ -590,6 +628,24 @@ pub fn is_paste_chord(keys: &str) -> bool {
         || (has("ins") && has("shift"))
 }
 
+/// Whether `keys` is a copy or cut chord on some platform, read as
+/// [`is_paste_chord`] reads chords: C or X with `meta`, `ctrl` or `mod`,
+/// Ctrl+Insert (copy), Shift+Delete (cut), or a copy or cut key of its own.
+pub fn is_copy_chord(keys: &str) -> bool {
+    let parts = normalize_chord(keys);
+    let has = |name: &str| parts.iter().any(|part| part == name);
+    let own_key = parts.iter().any(|part| {
+        matches!(
+            part.as_str(),
+            "copy" | "cut" | "xf86copy" | "xf86cut" | "keycode_copy" | "keycode_cut"
+        )
+    });
+    own_key
+        || ((has("c") || has("x")) && (has("meta") || has("ctrl") || has("mod")))
+        || (has("ins") && has("ctrl"))
+        || (has("delete") && has("shift"))
+}
+
 /// The platform's own text menu showing over an input, as read from the
 /// platform (read-only: the agent does not press its items).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -692,6 +748,9 @@ pub struct Agent {
     native: Box<dyn StrictNative>,
     require_hit_test: bool,
     keyboard: std::sync::Mutex<KeyboardTrack>,
+    /// The clipboard generation a copy or cut chord this agent pressed
+    /// wrote ([`StrictNative::clipboard_generation`]).
+    agent_clip: std::sync::Mutex<Option<u64>>,
 }
 
 /// How long the software keyboard's frame must stay the same before it
@@ -751,6 +810,7 @@ impl Agent {
             native,
             require_hit_test: false,
             keyboard: std::sync::Mutex::default(),
+            agent_clip: std::sync::Mutex::default(),
         }
     }
 
@@ -764,6 +824,7 @@ impl Agent {
             native,
             require_hit_test: true,
             keyboard: std::sync::Mutex::default(),
+            agent_clip: std::sync::Mutex::default(),
         }
     }
 
@@ -866,7 +927,7 @@ impl Agent {
         // The device's clipboard holds whatever a person or another app
         // copied (codes, passwords, addresses), and a pasted field is read
         // back unmasked into proof: only a clip this run set is pasted.
-        if word == "paste" && self.native.clipboard_set_by_agent() != Some(true) {
+        if word == "paste" && self.clipboard_owned() != Some(true) {
             return Err(
                 "the clipboard was not set by this run: Paste would put in what a person or \
                  another app copied (cut or copy through the text menu first)"
@@ -1299,7 +1360,7 @@ impl Agent {
         // A paste chord pastes the system clipboard, which can hold what a
         // person or another app copied (codes, passwords, addresses), into a
         // field read back unmasked into proof: only a clip this run set.
-        if is_paste_chord(keys) && self.native.clipboard_set_by_agent() != Some(true) {
+        if is_paste_chord(keys) && self.clipboard_owned() != Some(true) {
             return Err(format!(
                 "`{keys}` pastes the system clipboard, which was not set by this run: give the \
                  text with the paste op instead (it pastes that text, not the clipboard)"
@@ -1315,6 +1376,14 @@ impl Agent {
         if !node.enabled {
             return Err(format!("node {id} is disabled"));
         }
+        // A masked field's text copied or cut would become this run's clip,
+        // and a paste would then show it in a field read back unmasked.
+        let copying = is_copy_chord(keys);
+        if copying && node.states.iter().any(|state| state == "masked") {
+            return Err(format!(
+                "the field is masked: `{keys}` would give its text away"
+            ));
+        }
         self.native.validate_keys(keys)?;
         // A focused input takes the keys where it is (see `type_node`).
         if !(node.input && self.native.focused() == Some(id)) {
@@ -1327,8 +1396,64 @@ impl Agent {
                 }
             }
         }
+        // A copy or cut this agent presses makes the clip it writes this
+        // run's: the generation it moved the clipboard to, if it moved it
+        // (with nothing selected it writes nothing, and a clip already
+        // there stays another's). Where the platform knows the field's
+        // selection and can compare the clip, the clip must also be the
+        // text that was selected: an empty selection copies nothing, and a
+        // different text is someone else's write.
+        let before = copying
+            .then(|| self.native.clipboard_generation())
+            .flatten();
+        let selected = if before.is_some() && node.input {
+            self.native
+                .input_selections(&[id])
+                .get(&id)
+                .map(|&(start, end)| {
+                    node.value
+                        .as_deref()
+                        .and_then(|value| utf16_slice(value, start, end))
+                })
+        } else {
+            None
+        };
         self.native.press_keys(keys)?;
+        let clip_is_selection = match selected {
+            None => true,
+            Some(None) => false,
+            Some(Some(text)) => {
+                !text.is_empty() && self.native.clipboard_text_is(&text) != Some(false)
+            }
+        };
+        if copying
+            && clip_is_selection
+            && let (Some(before), Some(after)) = (before, self.native.clipboard_generation())
+            && after != before
+        {
+            *self
+                .agent_clip
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(after);
+        }
         self.settled()
+    }
+
+    /// Whether the clipboard holds a clip this run set: the platform's own
+    /// answer ([`StrictNative::clipboard_set_by_agent`]) when it has one,
+    /// else whether the clipboard's generation is still the one a copy or
+    /// cut chord this agent pressed wrote ([`StrictNative::clipboard_generation`]).
+    /// `None` when the platform can tell neither.
+    pub fn clipboard_owned(&self) -> Option<bool> {
+        if let Some(owned) = self.native.clipboard_set_by_agent() {
+            return Some(owned);
+        }
+        let now = self.native.clipboard_generation()?;
+        let mine = *self
+            .agent_clip
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Some(mine == Some(now))
     }
 
     /// Returns the app's current keymap and visible menu shortcuts.
