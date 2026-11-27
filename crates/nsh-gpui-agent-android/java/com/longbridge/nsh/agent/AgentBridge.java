@@ -162,7 +162,8 @@ public final class AgentBridge {
     }
 
     /**
-     * The text menu Android shows over an input now, read-only: its kind, then a fixed
+     * The text menu Android shows over an input now, read-only: its kind, the node id
+     * of the field it is over (empty when it cannot be told), then a fixed
      * word for each visible item in order ({@link #itemWord}: never the item's title,
      * which an OEM or a PROCESS_TEXT app may fill with what it likes, and the snapshot
      * lands in proof folders), and only the kind for a masked field. {@code "selection"} and {@code "insertion"}
@@ -175,32 +176,41 @@ public final class AgentBridge {
     public static String[] textMenu(View host) {
         return onMain(() -> {
             SparseArray views = views(host);
+            java.lang.ref.WeakReference<ActionMode> showing = MenuWatch.shown;
+            ActionMode shown = showing == null ? null : showing.get();
+            java.lang.ref.WeakReference<EditText> owning = MenuWatch.field;
+            EditText owner = owning == null ? null : owning.get();
             String[] edit = null;
+            int ownerId = HIT_NONE;
             for (int i = 0; i < views.size(); i++) {
                 Object view = views.valueAt(i);
                 if (!inputBoxClass.isInstance(view)) continue;
                 try {
                     EditText field = (EditText) inputEdit.get(view);
                     if (field != null) MenuWatch.watch(field);
+                    if (field != null && field == owner) ownerId = views.keyAt(i);
                     ActionMode own = (ActionMode) inputEditMenu.get(view);
-                    if (own != null && edit == null) edit = menuOf("edit", own.getMenu(), masked(field));
+                    if (own != null && edit == null) {
+                        edit = menuOf("edit", views.keyAt(i), own.getMenu(), masked(field));
+                    }
                 } catch (Exception e) {
                     Log.w("nsh", "test agent: text menu of " + views.keyAt(i) + ": " + e);
                 }
             }
-            ActionMode shown = MenuWatch.shown;
-            if (shown != null) {
-                java.lang.ref.WeakReference<EditText> owner = MenuWatch.field;
-                return menuOf(MenuWatch.kind, shown.getMenu(), masked(owner == null ? null : owner.get()));
-            }
+            if (shown != null) return menuOf(MenuWatch.kind, ownerId, shown.getMenu(), masked(owner));
             return edit != null ? edit : new String[0];
         }, new String[0]);
     }
 
-    /** {@code kind} and a word for each of {@code menu}'s visible items, in order; only the kind when {@code masked}. */
-    private static String[] menuOf(String kind, Menu menu, boolean masked) {
+    /**
+     * {@code kind}, the node id of the field it is over ({@code field}, or an empty
+     * string when it is not known), and a word for each of {@code menu}'s visible
+     * items, in order; no items when {@code masked}.
+     */
+    private static String[] menuOf(String kind, int field, Menu menu, boolean masked) {
         java.util.ArrayList<String> out = new java.util.ArrayList<>();
         out.add(kind);
+        out.add(field >= 0 ? Integer.toString(field) : "");
         for (int i = 0; !masked && menu != null && i < menu.size(); i++) {
             MenuItem item = menu.getItem(i);
             if (item.isVisible()) out.add(itemWord(item));
@@ -246,8 +256,11 @@ public final class AgentBridge {
      * only records which toolbar shows.
      */
     private static final class MenuWatch implements ActionMode.Callback {
-        /** The toolbar showing now, its kind, and the field it is over (weakly). */
-        static volatile ActionMode shown;
+        /**
+         * The toolbar showing now, its kind, and the field it is over: weakly, so a
+         * toolbar whose destroy never comes cannot keep its window's views alive.
+         */
+        static volatile java.lang.ref.WeakReference<ActionMode> shown;
         static volatile String kind;
         static volatile java.lang.ref.WeakReference<EditText> field;
 
@@ -278,7 +291,7 @@ public final class AgentBridge {
         public boolean onCreateActionMode(ActionMode mode, Menu menu) {
             boolean keep = inner == null || inner.onCreateActionMode(mode, menu);
             if (keep) {
-                shown = mode;
+                shown = new java.lang.ref.WeakReference<>(mode);
                 kind = watched;
                 field = owner;
             }
@@ -297,8 +310,16 @@ public final class AgentBridge {
 
         @Override
         public void onDestroyActionMode(ActionMode mode) {
-            if (inner != null) inner.onDestroyActionMode(mode);
-            if (shown == mode) shown = null;
+            try {
+                if (inner != null) inner.onDestroyActionMode(mode);
+            } finally {
+                // Cleared even when the callback it wraps throws.
+                java.lang.ref.WeakReference<ActionMode> showing = shown;
+                if (showing != null && showing.get() == mode) {
+                    shown = null;
+                    field = null;
+                }
+            }
         }
     }
 

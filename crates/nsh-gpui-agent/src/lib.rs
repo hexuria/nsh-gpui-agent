@@ -34,7 +34,8 @@ pub const SOFTWARE_KEYBOARD_ID: &str = "system-keyboard";
 
 /// The id of the node a snapshot ends with while the platform's own text
 /// menu shows over an input (Android's floating toolbar): role `menu`, its
-/// kind a state (`selection`, `insertion`, `edit`), its visible items
+/// kind a state (`selection`, `insertion`, `edit`), a `field: <id>` state
+/// naming the input it is over when the platform can tell, its visible items
 /// children of role `menuitem` named by a fixed word (`cut`, `copy`,
 /// `paste`, `select-all`, …, `other`), none for a masked field, all
 /// `system` and taking no action. Absent
@@ -282,7 +283,7 @@ impl AgentHost for NshAgentHost {
             roots.push(keyboard_node(frame));
         }
         if let Some(menu) = self.agent.native_text_menu() {
-            roots.push(text_menu_node(&menu));
+            roots.push(text_menu_node(&menu, &index));
         }
         // A resize or a failed call while the nodes were read.
         if !self.agent.native_available()
@@ -728,11 +729,15 @@ impl<'a> SnapshotIndex<'a> {
 /// The snapshot's node for the platform's text menu ([`TEXT_MENU_ID`]):
 /// not one of the app's views, so it and its items take no action. Its
 /// bounds stay zero: the platform does not say where it floats.
-fn text_menu_node(menu: &nsh_agent_actions::TextMenu) -> UiNode {
+fn text_menu_node(menu: &nsh_agent_actions::TextMenu, index: &SnapshotIndex<'_>) -> UiNode {
     let mut node = UiNode::new(TEXT_MENU_ID, "menu", "Text menu");
     node.enabled = false;
     node.states
         .extend(["system".to_owned(), menu.kind.to_owned()]);
+    // The input it is over, by the id a recipe names it with.
+    if let Some(field) = menu.field.and_then(|id| index.ids.get(&id)) {
+        node.states.push(format!("field: {field}"));
+    }
     node.children = menu
         .items
         .iter()
@@ -1662,6 +1667,7 @@ mod tests {
             None,
             nsh_agent_actions::TextMenu::from_strings(&[
                 "insertion".into(),
+                "3".into(),
                 "paste".into(),
                 "select-all".into(),
             ]),
@@ -1683,6 +1689,12 @@ mod tests {
             assert!(!node.enabled);
             assert!(node.states.iter().any(|state| state == "system"));
             assert!(node.states.iter().any(|state| state == menu.kind));
+            // Node 3 is `visible` in the sample.
+            assert!(
+                node.states.iter().any(|state| state == "field: visible"),
+                "{:?}",
+                node.states
+            );
             let items: Vec<(&str, bool)> = node
                 .children
                 .iter()

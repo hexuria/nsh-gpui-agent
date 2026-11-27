@@ -541,6 +541,8 @@ pub struct TextMenu {
     /// Which menu: [`TextMenu::SELECTION`], [`TextMenu::INSERTION`] or
     /// [`TextMenu::EDIT`].
     pub kind: &'static str,
+    /// The input it is over, when the platform can tell.
+    pub field: Option<NodeId>,
     /// A fixed word for each visible item, in order (`cut`, `copy`, `paste`,
     /// `select-all`, …, `other` for an item the platform does not define):
     /// never the item's own title, which other apps may fill freely. None
@@ -558,16 +560,24 @@ impl TextMenu {
     /// A toolbar the app opened over a selection it draws itself.
     pub const EDIT: &'static str = "edit";
 
-    /// The menu a host's bridge answered as `[kind, item, item, …]`: none
-    /// for an empty answer or a kind it does not know, so a bridge fault
-    /// shows no menu rather than a wrong one.
+    /// The menu a host's bridge answered as `[kind, field, item, item, …]`
+    /// (`field` the input's node id, empty when it is not known): none for
+    /// an answer without both, a kind it does not know or a field that is
+    /// no node id, so a bridge fault shows no menu rather than a wrong one.
     pub fn from_strings(values: &[String]) -> Option<TextMenu> {
-        let (kind, items) = values.split_first()?;
+        let [kind, field, items @ ..] = values else {
+            return None;
+        };
         let kind = [Self::SELECTION, Self::INSERTION, Self::EDIT]
             .into_iter()
             .find(|known| *known == kind.as_str())?;
+        let field = match field.as_str() {
+            "" => None,
+            id => Some(id.parse::<NodeId>().ok()?),
+        };
         Some(TextMenu {
             kind,
+            field,
             items: items.to_vec(),
         })
     }

@@ -3440,21 +3440,27 @@ fn a_hold_within_a_node_refuses_a_point_scrolled_off_the_window() {
 fn a_text_menu_is_read_only_from_a_known_kind() {
     let strings = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
     assert_eq!(
-        TextMenu::from_strings(&strings(&["selection", "cut", "copy", "select-all"])),
+        TextMenu::from_strings(&strings(&["selection", "7", "cut", "copy", "select-all"])),
         Some(TextMenu {
             kind: TextMenu::SELECTION,
+            field: Some(7),
             items: strings(&["cut", "copy", "select-all"]),
         })
     );
     assert_eq!(
-        TextMenu::from_strings(&strings(&["insertion"])).map(|menu| menu.items.len()),
-        Some(0)
+        TextMenu::from_strings(&strings(&["insertion", ""]))
+            .map(|menu| (menu.field, menu.items.len())),
+        Some((None, 0))
     );
     assert_eq!(TextMenu::from_strings(&[]), None);
-    assert_eq!(
-        TextMenu::from_strings(&strings(&["paste", "select-all"])),
-        None
-    );
+    // No field slot, an unknown kind, a field that is no id.
+    for values in [
+        &["insertion"][..],
+        &["paste", "", "select-all"][..],
+        &["edit", "seven", "copy"][..],
+    ] {
+        assert_eq!(TextMenu::from_strings(&strings(values)), None, "{values:?}");
+    }
 }
 
 #[test]
