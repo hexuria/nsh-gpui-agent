@@ -475,6 +475,31 @@ impl StrictNative for AndroidStrictNative {
         TextMenu::from_strings(&values)
     }
 
+    fn press_text_menu_item(&self, word: &str) -> Result<(), String> {
+        let refused: Option<String> = self.call(|env, class, view| {
+            let word = env.new_string(word)?;
+            let answer = env
+                .call_static_method(
+                    class,
+                    "pressTextMenuItem",
+                    "(Landroid/view/View;Ljava/lang/String;)Ljava/lang/String;",
+                    &[JValue::Object(view), JValue::Object(&word)],
+                )?
+                .l()?;
+            if answer.is_null() {
+                return Ok(None);
+            }
+            let answer = JString::from(answer);
+            let text = env.get_string(&answer)?;
+            Ok(Some(String::from(text)))
+        });
+        match refused.as_deref() {
+            Some("") => Ok(()),
+            Some(why) => Err(why.to_owned()),
+            None => Err("Android did not answer the text menu press".into()),
+        }
+    }
+
     fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
         let frame = self
             .floats("keyboardFrame")

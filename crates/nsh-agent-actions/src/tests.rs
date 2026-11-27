@@ -3491,3 +3491,21 @@ fn selections_from_triples_drops_unasked_duplicate_and_bad_ids() {
     assert_eq!(got.len(), 1, "{got:?}");
     assert_eq!(got.get(&8), Some(&(1, 4)));
 }
+
+#[test]
+fn only_items_that_stay_inside_the_app_are_pressable() {
+    for word in ["cut", "copy", "paste", "select-all"] {
+        assert!(TextMenu::pressable(word), "{word}");
+    }
+    for word in [
+        "share",
+        "assist",
+        "autofill",
+        "other",
+        "replace",
+        "paste-as-plain-text",
+        "",
+    ] {
+        assert!(!TextMenu::pressable(word), "{word}");
+    }
+}

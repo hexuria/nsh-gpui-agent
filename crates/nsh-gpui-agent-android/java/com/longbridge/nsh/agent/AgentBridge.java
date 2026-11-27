@@ -203,6 +203,60 @@ public final class AgentBridge {
     }
 
     /**
+     * Presses item {@code word} of the text menu showing now (the one {@link #textMenu}
+     * reports), through that menu: {@code performIdentifierAction} runs the item as the
+     * toolbar does when a finger taps it, so the field's own handler (Cut, Copy, Paste,
+     * Select all) acts. Only those four: an item that leaves the app is never pressed.
+     * Returns an empty string when pressed, else why not: no menu, the item absent or
+     * disabled, or a masked field's text that Cut or Copy would give away.
+     */
+    public static String pressTextMenuItem(View host, String word) {
+        String refused = onMain(() -> {
+            int id = itemId(word);
+            if (id == 0) return "`" + word + "` is not pressed";
+            SparseArray views = views(host);
+            java.lang.ref.WeakReference<ActionMode> showing = MenuWatch.shown;
+            ActionMode menu = showing == null ? null : showing.get();
+            java.lang.ref.WeakReference<EditText> owning = MenuWatch.field;
+            EditText field = owning == null ? null : owning.get();
+            if (menu == null) {
+                // The kit's own edit menu, as textMenu falls back to it.
+                for (int i = 0; i < views.size() && menu == null; i++) {
+                    Object view = views.valueAt(i);
+                    if (!inputBoxClass.isInstance(view)) continue;
+                    ActionMode own = (ActionMode) inputEditMenu.get(view);
+                    if (own != null) {
+                        menu = own;
+                        field = (EditText) inputEdit.get(view);
+                    }
+                }
+            }
+            if (menu == null) return "no text menu shows";
+            if ((id == android.R.id.cut || id == android.R.id.copy) && masked(field)) {
+                return "the field is masked: `" + word + "` would give its text away";
+            }
+            MenuItem item = menu.getMenu().findItem(id);
+            if (item == null || !item.isVisible()) return "the text menu has no `" + word + "`";
+            if (!item.isEnabled()) return "`" + word + "` is disabled in the text menu";
+            return menu.getMenu().performIdentifierAction(id, 0)
+                    ? ""
+                    : "the text menu did not take `" + word + "`";
+        });
+        return refused == null ? "the main thread did not answer" : refused;
+    }
+
+    /** The android.R.id of a pressable menu word; 0 for any other word. */
+    private static int itemId(String word) {
+        switch (word) {
+            case "cut": return android.R.id.cut;
+            case "copy": return android.R.id.copy;
+            case "paste": return android.R.id.paste;
+            case "select-all": return android.R.id.selectAll;
+            default: return 0;
+        }
+    }
+
+    /**
      * {@code kind}, the node id of the field it is over ({@code field}, or an empty
      * string when it is not known), and a word for each of {@code menu}'s visible
      * items, in order; no items when {@code masked}.
