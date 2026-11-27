@@ -36,10 +36,15 @@ pub const SOFTWARE_KEYBOARD_ID: &str = "system-keyboard";
 /// menu shows over an input (Android's floating toolbar): role `menu`, its
 /// kind a state (`selection`, `insertion`, `edit`), a `field: <id>` state
 /// naming the input it is over when the platform can tell, its visible items
-/// children of role `menuitem` named by a fixed word (`cut`, `copy`,
-/// `paste`, `select-all`, …, `other`), none for a masked field, all
-/// `system` and taking no action. Absent
-/// while no such menu shows.
+/// children of role `menuitem` with ids `system-text-menu-<word>` named by
+/// a fixed word (`cut`, `copy`, `paste`, `select-all`, …, `other`), none for
+/// a masked field, all `system`. Cut, copy, paste and select-all take a
+/// press, through the menu ([`nsh_agent_actions::Agent::press_text_menu_item`]);
+/// the rest take no action. Absent while no such menu shows.
+///
+/// The `system-text-menu-` id prefix is reserved: a press on any id that
+/// starts with it goes to the menu, so an app must not give a node a
+/// `testID` that does.
 pub const TEXT_MENU_ID: &str = "system-text-menu";
 
 /// The `hello.features` entry of a host that reports the software keyboard
@@ -110,6 +115,22 @@ impl NshAgentHost {
     }
 
     fn dispatch_available(&mut self, op: &Op) -> Result<DispatchResult, String> {
+        // A press on an item of the platform's text menu goes through that
+        // menu: it is no view of the app's tree.
+        let pressed = match op {
+            Op::Click { target, .. } => Some(target.as_str()),
+            Op::Press {
+                target: Some(target),
+                ..
+            } => Some(target.as_str()),
+            _ => None,
+        };
+        if let Some(word) = pressed.and_then(text_menu_item_word) {
+            return self
+                .agent
+                .press_text_menu_item(word)
+                .map(|()| DispatchResult::empty());
+        }
         match op {
             Op::Click { target, .. } => self
                 .agent
@@ -738,18 +759,46 @@ fn text_menu_node(menu: &nsh_agent_actions::TextMenu, index: &SnapshotIndex<'_>)
     if let Some(field) = menu.field.and_then(|id| index.ids.get(&id)) {
         node.states.push(format!("field: {field}"));
     }
-    node.children = menu
-        .items
-        .iter()
-        .enumerate()
-        .map(|(n, title)| {
-            let mut item = UiNode::new(format!("{TEXT_MENU_ID}-{}", n + 1), "menuitem", title);
-            item.enabled = false;
+    node.children = text_menu_item_ids(&menu.items)
+        .into_iter()
+        .zip(&menu.items)
+        .map(|(id, word)| {
+            let mut item = UiNode::new(id, "menuitem", word);
+            // Pressed through the menu itself ([`Agent::press_text_menu_item`]).
+            item.enabled = nsh_agent_actions::TextMenu::pressable(word);
             item.states.push("system".into());
             item
         })
         .collect();
     node
+}
+
+/// The ids of a text menu's items: `system-text-menu-<word>`, a word that
+/// comes again (`other`) numbered from its second (`-other-2`), so a press
+/// names the item it means whatever moved in the menu meanwhile.
+fn text_menu_item_ids(items: &[String]) -> Vec<String> {
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    items
+        .iter()
+        .map(|word| {
+            let n = seen.entry(word.as_str()).or_insert(0);
+            *n += 1;
+            if *n == 1 {
+                format!("{TEXT_MENU_ID}-{word}")
+            } else {
+                format!("{TEXT_MENU_ID}-{word}-{n}")
+            }
+        })
+        .collect()
+}
+
+/// The word of the text menu item `target` names (`system-text-menu-copy`
+/// gives `copy`), for a press on it.
+fn text_menu_item_word(target: &str) -> Option<&str> {
+    target
+        .strip_prefix(TEXT_MENU_ID)?
+        .strip_prefix('-')
+        .filter(|word| !word.is_empty())
 }
 
 /// The snapshot's node for the software keyboard showing at `frame`: not
@@ -1431,6 +1480,10 @@ mod tests {
         keyboard: Result<Option<Bounds<Points>>, String>,
         /// The platform's text menu showing.
         text_menu: Option<nsh_agent_actions::TextMenu>,
+        /// The text menu items the host was asked to press.
+        menu_presses: Arc<std::sync::Mutex<Vec<String>>>,
+        /// Whether the clipboard holds a clip the agent set.
+        agent_clip: Option<bool>,
         /// Input 3's selection, as the platform holds it.
         selection: Option<(u32, u32)>,
         /// How many times the selections were read.
@@ -1448,6 +1501,8 @@ mod tests {
                 drags: Arc::default(),
                 keyboard: Ok(None),
                 text_menu: None,
+                menu_presses: Arc::default(),
+                agent_clip: None,
                 selection: None,
                 selection_reads: Arc::default(),
             }
@@ -1477,6 +1532,15 @@ mod tests {
 
         fn text_menu(&self) -> Option<nsh_agent_actions::TextMenu> {
             self.text_menu.clone()
+        }
+
+        fn press_text_menu_item(&self, word: &str) -> Result<(), String> {
+            self.menu_presses.lock().unwrap().push(word.to_owned());
+            Ok(())
+        }
+
+        fn clipboard_set_by_agent(&self) -> Option<bool> {
+            self.agent_clip
         }
 
         fn input_selections(&self, ids: &[NodeId]) -> HashMap<NodeId, (u32, u32)> {
@@ -1695,13 +1759,136 @@ mod tests {
                 "{:?}",
                 node.states
             );
-            let items: Vec<(&str, bool)> = node
+            let items: Vec<(&str, &str, bool)> = node
                 .children
                 .iter()
-                .map(|item| (item.name.as_str(), item.enabled))
+                .map(|item| (item.id.as_str(), item.name.as_str(), item.enabled))
                 .collect();
-            assert_eq!(items, [("paste", false), ("select-all", false)]);
+            assert_eq!(
+                items,
+                [
+                    ("system-text-menu-paste", "paste", true),
+                    ("system-text-menu-select-all", "select-all", true),
+                ]
+            );
         }
+    }
+
+    #[test]
+    fn text_menu_items_are_named_by_their_word_and_only_in_app_ones_take_presses() {
+        let words = ["copy", "share", "other", "other"].map(String::from);
+        assert_eq!(
+            text_menu_item_ids(&words),
+            [
+                "system-text-menu-copy",
+                "system-text-menu-share",
+                "system-text-menu-other",
+                "system-text-menu-other-2",
+            ]
+        );
+        assert_eq!(text_menu_item_word("system-text-menu-copy"), Some("copy"));
+        assert_eq!(text_menu_item_word("system-text-menu"), None);
+        assert_eq!(text_menu_item_word("system-text-menu-"), None);
+        assert_eq!(text_menu_item_word("visible"), None);
+    }
+
+    #[test]
+    fn a_press_on_a_text_menu_item_goes_through_the_menu() {
+        let menu = nsh_agent_actions::TextMenu::from_strings(
+            &["selection", "3", "cut", "copy", "share"].map(String::from),
+        );
+        let mut native = SnapshotNative::new(true, None, false);
+        native.text_menu = menu;
+        let pressed = native.menu_presses.clone();
+        let mut host = snapshot_host_with_native(
+            SnapshotScene(Ok(sample_nodes()), 1, Default::default()),
+            native,
+        );
+
+        host.dispatch(&Op::click("system-text-menu-copy")).unwrap();
+        assert_eq!(*pressed.lock().unwrap(), ["copy"]);
+
+        // An item that leaves the app, one the menu lacks, a word that is
+        // no item: refused, and nothing reaches the platform.
+        for target in [
+            "system-text-menu-share",
+            "system-text-menu-paste",
+            "system-text-menu-other-2",
+        ] {
+            let error = host
+                .dispatch(&Op::Press {
+                    target: Some(target.into()),
+                    x: None,
+                    y: None,
+                    expect_fingerprint: None,
+                })
+                .unwrap_err();
+            assert!(!error.is_empty(), "{target}");
+        }
+        assert_eq!(*pressed.lock().unwrap(), ["copy"]);
+    }
+
+    #[test]
+    fn paste_through_the_menu_needs_a_clip_this_run_set() {
+        // A foreign clip, one the platform cannot vouch for, and this run's.
+        for (agent_clip, pastes) in [(Some(false), false), (None, false), (Some(true), true)] {
+            let mut native = SnapshotNative::new(true, None, false);
+            native.text_menu = nsh_agent_actions::TextMenu::from_strings(
+                &["insertion", "3", "paste", "select-all"].map(String::from),
+            );
+            native.agent_clip = agent_clip;
+            let pressed = native.menu_presses.clone();
+            let mut host = snapshot_host_with_native(
+                SnapshotScene(Ok(sample_nodes()), 1, Default::default()),
+                native,
+            );
+            let result = host.dispatch(&Op::click("system-text-menu-paste"));
+            if pastes {
+                result.unwrap();
+                assert_eq!(*pressed.lock().unwrap(), ["paste"]);
+            } else {
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("clipboard was not set by this run"),
+                    "{agent_clip:?}: {error}"
+                );
+                assert!(pressed.lock().unwrap().is_empty(), "{agent_clip:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn copy_through_the_menu_does_not_ask_whose_clip_it_is() {
+        // Copy and select-all write no foreign text into a field.
+        let mut native = SnapshotNative::new(true, None, false);
+        native.text_menu = nsh_agent_actions::TextMenu::from_strings(
+            &["selection", "3", "copy", "select-all"].map(String::from),
+        );
+        native.agent_clip = Some(false);
+        let pressed = native.menu_presses.clone();
+        let mut host = snapshot_host_with_native(
+            SnapshotScene(Ok(sample_nodes()), 1, Default::default()),
+            native,
+        );
+        host.dispatch(&Op::click("system-text-menu-copy")).unwrap();
+        host.dispatch(&Op::click("system-text-menu-select-all"))
+            .unwrap();
+        assert_eq!(*pressed.lock().unwrap(), ["copy", "select-all"]);
+    }
+
+    #[test]
+    fn a_press_on_a_text_menu_item_is_refused_while_no_menu_shows() {
+        let native = SnapshotNative::new(true, None, false);
+        let pressed = native.menu_presses.clone();
+        let mut host = snapshot_host_with_native(
+            SnapshotScene(Ok(sample_nodes()), 1, Default::default()),
+            native,
+        );
+        let error = host
+            .dispatch(&Op::click("system-text-menu-copy"))
+            .unwrap_err();
+        assert!(error.contains("no text menu"), "{error}");
+        assert!(pressed.lock().unwrap().is_empty());
     }
 
     #[test]

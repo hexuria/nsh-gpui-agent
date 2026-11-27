@@ -314,6 +314,24 @@ pub trait StrictNative: Native {
         None
     }
 
+    /// Presses item `word` ([`TextMenu::PRESSABLE`]) of the platform's own
+    /// text menu showing now, through that menu, so the platform's own
+    /// handler runs as a finger's tap on it would. Refused when no menu
+    /// shows, the item is absent or disabled, or a masked field would give
+    /// its text away (cut, copy).
+    fn press_text_menu_item(&self, word: &str) -> Result<(), String> {
+        let _ = word;
+        Err("this platform cannot press its text menu".into())
+    }
+
+    /// Whether the clipboard holds a clip this run of the agent put there
+    /// (Cut or Copy it pressed, a paste it made): `None` when the platform
+    /// cannot tell. A Paste the agent presses needs `Some(true)`, so it never
+    /// inserts what a person or another app copied.
+    fn clipboard_set_by_agent(&self) -> Option<bool> {
+        None
+    }
+
     /// The selections of inputs `ids` as the platform holds them, read in
     /// one go (a snapshot asks for every input at once, so a host whose
     /// views live on another thread pays one hop, not one per field). Each
@@ -560,6 +578,17 @@ impl TextMenu {
     /// A toolbar the app opened over a selection it draws itself.
     pub const EDIT: &'static str = "edit";
 
+    /// The items the agent presses: those whose effect stays inside the
+    /// app and the clipboard. Share, assist, autofill and any item the
+    /// platform does not define (`other`) leave the app and are never
+    /// pressed.
+    pub const PRESSABLE: [&'static str; 4] = ["cut", "copy", "paste", "select-all"];
+
+    /// Whether the agent presses item `word` ([`TextMenu::PRESSABLE`]).
+    pub fn pressable(word: &str) -> bool {
+        Self::PRESSABLE.contains(&word)
+    }
+
     /// The menu a host's bridge answered as `[kind, field, item, item, …]`
     /// (`field` the input's node id, empty when it is not known): none for
     /// an answer without both, a kind it does not know or a field that is
@@ -768,6 +797,45 @@ impl Agent {
     /// The platform's own text menu showing now ([`StrictNative::text_menu`]).
     pub fn native_text_menu(&self) -> Option<TextMenu> {
         self.native.text_menu()
+    }
+
+    /// Presses item `word` of the platform's own text menu showing now
+    /// ([`StrictNative::press_text_menu_item`]): only an item of
+    /// [`TextMenu::PRESSABLE`], and only one the showing menu has.
+    pub fn press_text_menu_item(&self, word: &str) -> Result<(), String> {
+        if !TextMenu::pressable(word) {
+            return Err(format!(
+                "`{word}` is not pressed: only {} of the text menu stay inside the app",
+                TextMenu::PRESSABLE.join(", ")
+            ));
+        }
+        let menu = self
+            .native
+            .text_menu()
+            .ok_or_else(|| "no text menu shows".to_string())?;
+        if !menu.items.iter().any(|item| item == word) {
+            return Err(format!(
+                "the {} text menu has no `{word}` (it has: {})",
+                menu.kind,
+                if menu.items.is_empty() {
+                    "nothing it reports".to_owned()
+                } else {
+                    menu.items.join(", ")
+                }
+            ));
+        }
+        // The device's clipboard holds whatever a person or another app
+        // copied (codes, passwords, addresses), and a pasted field is read
+        // back unmasked into proof: only a clip this run set is pasted.
+        if word == "paste" && self.native.clipboard_set_by_agent() != Some(true) {
+            return Err(
+                "the clipboard was not set by this run: Paste would put in what a person or \
+                 another app copied (cut or copy through the text menu first)"
+                    .into(),
+            );
+        }
+        self.native.press_text_menu_item(word)?;
+        self.settled()
     }
 
     /// The selections of inputs `ids` as the platform holds them
