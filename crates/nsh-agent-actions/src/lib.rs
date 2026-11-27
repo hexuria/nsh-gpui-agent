@@ -307,6 +307,13 @@ pub trait StrictNative: Native {
     fn take_failure(&self) -> Option<String> {
         None
     }
+    /// Where input `id`'s selection is as the platform holds it: its
+    /// start and end in UTF-16 code units, start first (equal for a bare
+    /// caret). `None` when the platform does not say, or `id` is no input.
+    fn input_selection(&self, id: NodeId) -> Option<(u32, u32)> {
+        let _ = id;
+        None
+    }
 }
 
 /// Whether `at` is inside `bounds` clear of its edges along the axis a
@@ -660,6 +667,12 @@ impl Agent {
     /// Current native input value for `id`.
     pub fn native_input_text(&self, id: NodeId) -> Option<String> {
         self.native.input_text(id)
+    }
+
+    /// Input `id`'s selection as the platform holds it
+    /// ([`StrictNative::input_selection`]).
+    pub fn native_input_selection(&self, id: NodeId) -> Option<(u32, u32)> {
+        self.native.input_selection(id)
     }
 
     fn target_geometry(&self, node: &SemanticNode) -> Option<TargetGeometry> {

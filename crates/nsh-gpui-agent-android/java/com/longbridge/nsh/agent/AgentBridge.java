@@ -157,6 +157,22 @@ public final class AgentBridge {
         }, false);
     }
 
+    /**
+     * Input node {@code id}'s selection as its EditText holds it: {start, end}
+     * in UTF-16 code units, start first (equal for a bare caret). Empty when
+     * {@code id} is no input or the field has no selection.
+     */
+    public static int[] inputSelection(View host, int id) {
+        return onMain(() -> {
+            Object view = views(host).get(id);
+            if (!inputBoxClass.isInstance(view)) return new int[0];
+            EditText edit = (EditText) inputEdit.get(view);
+            int start = edit.getSelectionStart(), end = edit.getSelectionEnd();
+            if (start < 0 || end < 0) return new int[0];
+            return new int[] {Math.min(start, end), Math.max(start, end)};
+        }, new int[0]);
+    }
+
     /** Whether the surface's window has focus. */
     public static boolean appFocused(View host) {
         return onMain(host::hasWindowFocus, false);

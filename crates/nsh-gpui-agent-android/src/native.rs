@@ -11,7 +11,7 @@ use std::{
 
 use jni::{
     JNIEnv,
-    objects::{GlobalRef, JClass, JFloatArray, JObject, JValue},
+    objects::{GlobalRef, JClass, JFloatArray, JIntArray, JObject, JValue},
 };
 use nsh_agent_actions::StrictNative;
 use nsh_core::{
@@ -412,6 +412,32 @@ impl StrictNative for AndroidStrictNative {
         });
         done.then_some(())
             .ok_or_else(|| "Android could not change the requested orientation".into())
+    }
+
+    fn input_selection(&self, id: NodeId) -> Option<(u32, u32)> {
+        let id = i32::try_from(id).ok()?;
+        let selection: Option<Vec<i32>> = self.call(|env, class, view| {
+            let array = env
+                .call_static_method(
+                    class,
+                    "inputSelection",
+                    "(Landroid/view/View;I)[I",
+                    &[JValue::Object(view), JValue::Int(id)],
+                )?
+                .l()?;
+            if array.is_null() {
+                return Ok(None);
+            }
+            let array = JIntArray::from(array);
+            let len = env.get_array_length(&array)? as usize;
+            let mut out = vec![0; len];
+            env.get_int_array_region(&array, 0, &mut out)?;
+            Ok(Some(out))
+        });
+        match selection?.as_slice() {
+            &[start, end] if start >= 0 && end >= start => Some((start as u32, end as u32)),
+            _ => None,
+        }
     }
 
     fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {

@@ -714,6 +714,12 @@ fn keyboard_node(frame: nsh_core::geometry::Bounds<Points>) -> UiNode {
     node
 }
 
+/// The tree state naming an input's selection: `selection: <start>-<end>`
+/// in UTF-16 code units.
+fn selection_state(start: u32, end: u32) -> String {
+    format!("selection: {start}-{end}")
+}
+
 fn ui_node(node: &SemanticNode, index: &SnapshotIndex<'_>, agent: &Agent) -> UiNode {
     let mut name = node
         .label
@@ -787,6 +793,15 @@ fn ui_node(node: &SemanticNode, index: &SnapshotIndex<'_>, agent: &Agent) -> UiN
     }
     if node.selected && !result.states.iter().any(|state| state == "selected") {
         result.states.push("selected".into());
+    }
+    // Where the input's selection is, as the platform holds it: a state a
+    // 0.4 reader already parses and a recipe can assert (`selection: 0-9`,
+    // equal ends for a bare caret). Offsets only, so a masked field gives
+    // away no more than its bullets do.
+    if node.input
+        && let Some((start, end)) = agent.native_input_selection(node.id)
+    {
+        result.states.push(selection_state(start, end));
     }
     result.children = index
         .children
@@ -1360,6 +1375,8 @@ mod tests {
         presses: Arc<std::sync::Mutex<Vec<Point<Points>>>>,
         drags: DragRecords,
         keyboard: Result<Option<Bounds<Points>>, String>,
+        /// Input 3's selection, as the platform holds it.
+        selection: Option<(u32, u32)>,
     }
 
     impl SnapshotNative {
@@ -1372,6 +1389,7 @@ mod tests {
                 presses: Arc::default(),
                 drags: Arc::default(),
                 keyboard: Ok(None),
+                selection: None,
             }
         }
     }
@@ -1395,6 +1413,10 @@ mod tests {
 
         fn hit_at(&self, _: Point<Points>) -> Result<Option<NodeId>, String> {
             Ok(self.hit)
+        }
+
+        fn input_selection(&self, id: NodeId) -> Option<(u32, u32)> {
+            (id == 3).then_some(self.selection).flatten()
         }
     }
 
@@ -1568,6 +1590,56 @@ mod tests {
                 assert_eq!(input.value.as_deref(), Some(secret));
             }
         }
+    }
+
+    #[test]
+    fn snapshot_names_an_inputs_selection_as_the_platform_holds_it() {
+        for (selection, state) in [
+            (Some((0, 7)), Some("selection: 0-7")),
+            (Some((3, 3)), Some("selection: 3-3")),
+            (None, None),
+        ] {
+            let mut nodes = sample_nodes();
+            nodes[2].role = "textbox".into();
+            nodes[2].input = true;
+            let mut native = SnapshotNative::new(true, Some("1234567".into()), false);
+            native.selection = selection;
+            let host =
+                snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);
+            let snapshot = host.snapshot();
+            let input = &snapshot.nodes[0].children[1];
+            let found: Vec<&str> = input
+                .states
+                .iter()
+                .map(String::as_str)
+                .filter(|state| state.starts_with("selection: "))
+                .collect();
+            assert_eq!(
+                found,
+                state.into_iter().collect::<Vec<_>>(),
+                "{selection:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_gives_no_selection_to_a_node_that_is_not_an_input() {
+        let nodes = sample_nodes();
+        assert!(!nodes[2].input);
+        let mut native = SnapshotNative::new(true, None, false);
+        native.selection = Some((0, 2));
+        let host =
+            snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);
+        let snapshot = host.snapshot();
+        let node = &snapshot.nodes[0].children[1];
+        assert!(
+            !node
+                .states
+                .iter()
+                .any(|state| state.starts_with("selection: ")),
+            "{:?}",
+            node.states
+        );
     }
 
     #[test]
