@@ -959,14 +959,12 @@ impl Agent {
         let geometry = self
             .target_geometry(target)
             .ok_or_else(|| format!("`{selector}` is offscreen (no native bounds)"))?;
-        let at = self.actionable_point_with_press_owner(
+        let at = self.actionable_point_with_press_owner_scrolling_clear(
             id,
             geometry.owner,
             selected,
             &selector,
             Some(owner),
-            false,
-            false,
         )?;
         self.native.press(at);
         self.settled()
@@ -1596,7 +1594,7 @@ impl Agent {
         let geometry = self
             .target_geometry(&node)
             .ok_or_else(|| format!("`{selector}` is offscreen (no native bounds)"))?;
-        self.actionable_point(id, geometry.owner, at, &selector)
+        self.actionable_point_scrolling_clear(id, geometry.owner, at, &selector)
     }
 
     /// Checks that the native hit at `at` is enabled and supports `actionability`.
@@ -2059,7 +2057,7 @@ impl Agent {
                 // Scrolling can bring the field underneath another view.
                 self.scene.pick(selector, target)?;
             }
-            return Ok((id, self.actionable_point(id, owner, at, selector)?));
+            return Ok((id, self.actionable_point_scrolling_clear(id, owner, at, selector)?));
         };
         // A span of a text: its text view comes into view, then the finger
         // goes on its characters.
@@ -2098,6 +2096,70 @@ impl Agent {
             false,
             false,
         )
+    }
+
+    /// [`Agent::actionable_point`], retrying an occlusion a floating
+    /// overlay causes (a pager pill, a floating bar): a finger that finds
+    /// the cover scrolls the control towards the window's middle and taps
+    /// again. Bounded, and a cover that does not move (a sheet, a dialog)
+    /// still refuses.
+    fn actionable_point_scrolling_clear(
+        &self,
+        id: NodeId,
+        native_owner: NodeId,
+        fallback: Point<Points>,
+        selector: &str,
+    ) -> Result<Point<Points>, String> {
+        self.actionable_point_with_press_owner_scrolling_clear(
+            id,
+            native_owner,
+            fallback,
+            selector,
+            None,
+        )
+    }
+
+    /// [`Agent::actionable_point_with_press_owner`] with
+    /// [`Agent::actionable_point_scrolling_clear`]'s retry.
+    fn actionable_point_with_press_owner_scrolling_clear(
+        &self,
+        id: NodeId,
+        native_owner: NodeId,
+        fallback: Point<Points>,
+        selector: &str,
+        press_owner: Option<NodeId>,
+    ) -> Result<Point<Points>, String> {
+        let mut at = fallback;
+        for attempt in 0..3 {
+            match self.actionable_point_with_press_owner(
+                id,
+                native_owner,
+                at,
+                selector,
+                press_owner,
+                false,
+                false,
+            ) {
+                Ok(point) => return Ok(point),
+                Err(error) => {
+                    // The software keyboard's cover is not scrolled away
+                    // here: its own message says how, and a press meant
+                    // for the keyboard's target is not a tap past it.
+                    if error.starts_with("occluded_by: software keyboard")
+                        || !(error.starts_with("occluded_by:") && attempt < 2)
+                        || !self.scroll_towards_middle(native_owner)?
+                    {
+                        return Err(error);
+                    }
+                    at = self
+                        .native
+                        .bounds(native_owner)
+                        .map(|bounds| bounds.center())
+                        .unwrap_or(at);
+                }
+            }
+        }
+        unreachable!("the loop returns or errors on every path")
     }
 
     /// [`Agent::actionable_point`] for a point the caller chose: outside
@@ -2412,6 +2474,63 @@ impl Agent {
     /// towards its own middle, a gesture at a time, as a user would.
     fn scroll_into_view(&self, id: NodeId, selector: &str) -> Result<Point<Points>, String> {
         self.scroll_point_into_view(id, selector, None)
+    }
+
+    /// One scroll gesture moving view `id` towards the window's vertical
+    /// middle, as a finger scrolls a covered control clear of what covers
+    /// it. Answers whether a gesture went: a view whose scroll views cannot
+    /// move it that way (the content's end, no scroll view around it) is
+    /// left where it is, and so is one already at the middle.
+    fn scroll_towards_middle(&self, id: NodeId) -> Result<bool, String> {
+        let scrollers = self.scene.scroll_ancestors(id)?;
+        let Some(bounds) = self.native.bounds(id) else {
+            return Ok(false);
+        };
+        let at = bounds.center();
+        let middle_y = self.native.viewport().height.0 / 2.0;
+        if (at.y.0 - middle_y).abs() < 1.0 {
+            return Ok(false);
+        }
+        // The content moves towards its end (the view towards the top)
+        // when the view sits below the middle.
+        let below = at.y.0 > middle_y;
+        for &(scroller, horizontal) in scrollers.iter() {
+            if horizontal {
+                continue;
+            }
+            let Some(scroller_bounds) = self.native.bounds(scroller) else {
+                continue;
+            };
+            let can_move = self
+                .native
+                .scroll_room(scroller, false)
+                .is_none_or(|(start, end)| if below { end.0 } else { start.0 } >= 1.0);
+            if !can_move {
+                continue;
+            }
+            let extent = scroller_bounds.size.height.0;
+            // A third of the scroll view a gesture, as far as the view is
+            // from the middle: it does not shoot past it.
+            let want = (at.y.0 - middle_y).abs().min(extent / 3.0);
+            let step = if below { want } else { -want };
+            let fallback = point(
+                scroller_bounds.center().x,
+                scroller_bounds.center().y,
+            );
+            let middle = self
+                .landing(scroller, &scroller_bounds, false, 0.5)
+                .map(|along| {
+                    point(
+                        scroller_bounds.center().x,
+                        scroller_bounds.origin.y + scroller_bounds.size.height * along,
+                    )
+                })
+                .unwrap_or(fallback);
+            self.native.scroll(middle, point(Points(0.0), Points(step)));
+            self.stopped(id)?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// Brings a point within a view into view (its center when `local`
