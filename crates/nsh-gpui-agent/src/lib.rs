@@ -35,7 +35,9 @@ pub const SOFTWARE_KEYBOARD_ID: &str = "system-keyboard";
 /// The id of the node a snapshot ends with while the platform's own text
 /// menu shows over an input (Android's floating toolbar): role `menu`, its
 /// kind a state (`selection`, `insertion`, `edit`), its visible items
-/// children of role `menuitem`, all `system` and taking no action. Absent
+/// children of role `menuitem` named by a fixed word (`cut`, `copy`,
+/// `paste`, `select-all`, …, `other`), none for a masked field, all
+/// `system` and taking no action. Absent
 /// while no such menu shows.
 pub const TEXT_MENU_ID: &str = "system-text-menu";
 
@@ -1615,8 +1617,8 @@ mod tests {
             None,
             nsh_agent_actions::TextMenu::from_strings(&[
                 "insertion".into(),
-                "Paste".into(),
-                "Select all".into(),
+                "paste".into(),
+                "select-all".into(),
             ]),
         ] {
             let mut native = SnapshotNative::new(true, None, false);
@@ -1641,7 +1643,7 @@ mod tests {
                 .iter()
                 .map(|item| (item.name.as_str(), item.enabled))
                 .collect();
-            assert_eq!(items, [("Paste", false), ("Select all", false)]);
+            assert_eq!(items, [("paste", false), ("select-all", false)]);
         }
     }
 

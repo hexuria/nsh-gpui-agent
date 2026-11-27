@@ -3440,10 +3440,10 @@ fn a_hold_within_a_node_refuses_a_point_scrolled_off_the_window() {
 fn a_text_menu_is_read_only_from_a_known_kind() {
     let strings = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
     assert_eq!(
-        TextMenu::from_strings(&strings(&["selection", "Cut", "Copy", "Select all"])),
+        TextMenu::from_strings(&strings(&["selection", "cut", "copy", "select-all"])),
         Some(TextMenu {
             kind: TextMenu::SELECTION,
-            items: strings(&["Cut", "Copy", "Select all"]),
+            items: strings(&["cut", "copy", "select-all"]),
         })
     );
     assert_eq!(
@@ -3452,7 +3452,7 @@ fn a_text_menu_is_read_only_from_a_known_kind() {
     );
     assert_eq!(TextMenu::from_strings(&[]), None);
     assert_eq!(
-        TextMenu::from_strings(&strings(&["Paste", "Select all"])),
+        TextMenu::from_strings(&strings(&["paste", "select-all"])),
         None
     );
 }

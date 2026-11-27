@@ -529,7 +529,10 @@ pub struct TextMenu {
     /// Which menu: [`TextMenu::SELECTION`], [`TextMenu::INSERTION`] or
     /// [`TextMenu::EDIT`].
     pub kind: &'static str,
-    /// Its visible items' titles, in order, as the platform words them.
+    /// A fixed word for each visible item, in order (`cut`, `copy`, `paste`,
+    /// `select-all`, …, `other` for an item the platform does not define):
+    /// never the item's own title, which other apps may fill freely. None
+    /// for a masked field.
     pub items: Vec<String>,
 }
 

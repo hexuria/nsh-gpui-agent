@@ -162,8 +162,10 @@ public final class AgentBridge {
     }
 
     /**
-     * The text menu Android shows over an input now, read-only: its kind, then the
-     * titles of its visible items in order. {@code "selection"} and {@code "insertion"}
+     * The text menu Android shows over an input now, read-only: its kind, then a fixed
+     * word for each visible item in order ({@link #itemWord}: never the item's title,
+     * which an OEM or a PROCESS_TEXT app may fill with what it likes, and the snapshot
+     * lands in proof folders), and only the kind for a masked field. {@code "selection"} and {@code "insertion"}
      * are the field's own floating toolbar (EditText's, over a selection or at the
      * caret: Android draws the matching handles with it); {@code "edit"} is the one
      * the kit opens over a selection it draws itself (InputBox.openEditMenu). Empty
@@ -181,27 +183,59 @@ public final class AgentBridge {
                     EditText field = (EditText) inputEdit.get(view);
                     if (field != null) MenuWatch.watch(field);
                     ActionMode own = (ActionMode) inputEditMenu.get(view);
-                    if (own != null && edit == null) edit = menuOf("edit", own.getMenu());
+                    if (own != null && edit == null) edit = menuOf("edit", own.getMenu(), masked(field));
                 } catch (Exception e) {
                     Log.w("nsh", "test agent: text menu of " + views.keyAt(i) + ": " + e);
                 }
             }
             ActionMode shown = MenuWatch.shown;
-            if (shown != null) return menuOf(MenuWatch.kind, shown.getMenu());
+            if (shown != null) {
+                java.lang.ref.WeakReference<EditText> owner = MenuWatch.field;
+                return menuOf(MenuWatch.kind, shown.getMenu(), masked(owner == null ? null : owner.get()));
+            }
             return edit != null ? edit : new String[0];
         }, new String[0]);
     }
 
-    /** {@code kind} and the titles of {@code menu}'s visible items, in order. */
-    private static String[] menuOf(String kind, Menu menu) {
+    /** {@code kind} and a word for each of {@code menu}'s visible items, in order; only the kind when {@code masked}. */
+    private static String[] menuOf(String kind, Menu menu, boolean masked) {
         java.util.ArrayList<String> out = new java.util.ArrayList<>();
         out.add(kind);
-        for (int i = 0; menu != null && i < menu.size(); i++) {
+        for (int i = 0; !masked && menu != null && i < menu.size(); i++) {
             MenuItem item = menu.getItem(i);
-            CharSequence title = item.getTitle();
-            if (item.isVisible() && title != null) out.add(title.toString());
+            if (item.isVisible()) out.add(itemWord(item));
         }
         return out.toArray(new String[0]);
+    }
+
+    /** A fixed word for a text menu item by its id; {@code "other"} for any item Android does not define. */
+    private static String itemWord(MenuItem item) {
+        int id = item.getItemId();
+        if (id == android.R.id.cut) return "cut";
+        if (id == android.R.id.copy) return "copy";
+        if (id == android.R.id.paste) return "paste";
+        if (id == android.R.id.pasteAsPlainText) return "paste-as-plain-text";
+        if (id == android.R.id.selectAll) return "select-all";
+        if (id == android.R.id.replaceText) return "replace";
+        if (id == android.R.id.shareText) return "share";
+        if (id == android.R.id.textAssist) return "assist";
+        if (id == android.R.id.autofill) return "autofill";
+        return "other";
+    }
+
+    /** Whether {@code field} hides its text (a password or PIN field); a field that is gone counts as masked. */
+    private static boolean masked(EditText field) {
+        if (field == null) return true;
+        if (field.getTransformationMethod() instanceof android.text.method.PasswordTransformationMethod) return true;
+        int type = field.getInputType();
+        int variation = type & android.text.InputType.TYPE_MASK_VARIATION;
+        int kind = type & android.text.InputType.TYPE_MASK_CLASS;
+        return (kind == android.text.InputType.TYPE_CLASS_TEXT
+                        && (variation == android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+                                || variation == android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                                || variation == android.text.InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD))
+                || (kind == android.text.InputType.TYPE_CLASS_NUMBER
+                        && variation == android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD);
     }
 
     /**
@@ -212,27 +246,30 @@ public final class AgentBridge {
      * only records which toolbar shows.
      */
     private static final class MenuWatch implements ActionMode.Callback {
-        /** The toolbar showing now, and its kind. */
+        /** The toolbar showing now, its kind, and the field it is over (weakly). */
         static volatile ActionMode shown;
         static volatile String kind;
+        static volatile java.lang.ref.WeakReference<EditText> field;
 
         private final ActionMode.Callback inner;
         private final String watched;
+        private final java.lang.ref.WeakReference<EditText> owner;
 
-        private MenuWatch(ActionMode.Callback inner, String watched) {
+        private MenuWatch(ActionMode.Callback inner, String watched, EditText owner) {
             this.inner = inner;
             this.watched = watched;
+            this.owner = new java.lang.ref.WeakReference<>(owner);
         }
 
         static void watch(EditText field) {
             ActionMode.Callback selection = field.getCustomSelectionActionModeCallback();
             if (!(selection instanceof MenuWatch)) {
-                field.setCustomSelectionActionModeCallback(new MenuWatch(selection, "selection"));
+                field.setCustomSelectionActionModeCallback(new MenuWatch(selection, "selection", field));
             }
             if (Build.VERSION.SDK_INT >= 23) {
                 ActionMode.Callback insertion = field.getCustomInsertionActionModeCallback();
                 if (!(insertion instanceof MenuWatch)) {
-                    field.setCustomInsertionActionModeCallback(new MenuWatch(insertion, "insertion"));
+                    field.setCustomInsertionActionModeCallback(new MenuWatch(insertion, "insertion", field));
                 }
             }
         }
@@ -243,6 +280,7 @@ public final class AgentBridge {
             if (keep) {
                 shown = mode;
                 kind = watched;
+                field = owner;
             }
             return keep;
         }
