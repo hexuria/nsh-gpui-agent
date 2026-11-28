@@ -636,6 +636,12 @@ impl nsh_agent_actions::StrictNative for WebNative {
         self.scene.focus_node(id)
     }
 
+    /// A GPUI agent's page reports its focus ([`Native::focused`]): `None` there means nothing has it, so a press that
+    /// leaves nothing focused is refused. A test's agent keeps the default, as its other strict answers do.
+    fn focus_known(&self) -> bool {
+        self.agent
+    }
+
     fn app_focused(&self) -> bool {
         self.agent && self.scene.app_focused()
     }
