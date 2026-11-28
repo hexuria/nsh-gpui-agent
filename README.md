@@ -235,6 +235,17 @@ host implements.
 An app that serves a gpui-agent session of its own should name the same version, so the build holds one copy.
 Use the 0.4.0 command line (`cargo install gpui-agent-cli --version =0.4.0 --locked`).
 
+## Background and foreground
+
+A recipe that proves what an app does when the person leaves it and comes back (Android's process keeps running, so
+the agent socket keeps answering) uses `system background` and `system foreground`. On Android `system background`
+is the activity's `moveTaskToBack(true)`, the same as the person's Home; `system foreground` starts the task's own
+activity again with `FLAG_ACTIVITY_REORDER_TO_FRONT`. Android may refuse an activity start while the app is in the
+background (the background-activity-launch restrictions): the op then answers the refusal's own words, and the run
+brings the app back the way it started it — launching the app is not UI input. Both ops are listed in
+`hello.features` as `system.background` and `system.foreground` on Android; other platforms answer
+unsupported_op.
+
 ## The software keyboard
 
 On a phone the keyboard covers part of the app, and a press there lands on a key, not on the app: a fixed-point tap

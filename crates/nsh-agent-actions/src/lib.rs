@@ -308,6 +308,18 @@ pub trait StrictNative: Native {
         let _ = shown;
         Err("keyboard is not supported on this platform".into())
     }
+    /// Sends the app's task or window to the background, as the person's
+    /// Home does on a phone. The agent keeps answering while the app is
+    /// there.
+    fn background(&self) -> Result<(), String> {
+        Err("background is not supported on this platform".into())
+    }
+    /// Brings the app back to the foreground after [`Self::background`].
+    /// A platform whose windows cannot raise themselves from the
+    /// background answers the limit in the error.
+    fn foreground(&self) -> Result<(), String> {
+        Err("foreground is not supported on this platform".into())
+    }
     /// Whether the window shows the app laid out at its current size: an
     /// error while it has no size (minimized) or a resize is still being
     /// laid out.
@@ -1304,6 +1316,19 @@ impl Agent {
     /// Shows or hides the software keyboard.
     pub fn keyboard(&self, shown: bool) -> Result<(), String> {
         self.native.keyboard(shown).and_then(|()| self.settled())
+    }
+
+    /// Sends the app to the background ([`StrictNative::background`]). No
+    /// settle: a backgrounded app stops laying out, so there is nothing to
+    /// wait for, and the agent answers while the app is there.
+    pub fn background(&self) -> Result<(), String> {
+        self.native.background()
+    }
+
+    /// Brings the app back to the foreground and waits for the resulting
+    /// state.
+    pub fn foreground(&self) -> Result<(), String> {
+        self.native.foreground().and_then(|()| self.settled())
     }
 
     /// Types `text` into input `id`, focusing it first when needed, and waits for the resulting state.

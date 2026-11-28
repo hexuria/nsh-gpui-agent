@@ -522,6 +522,42 @@ public final class AgentBridge {
         return done != null && done;
     }
 
+    /**
+     * Sends the surface's task to the background, as the person's Home does: the
+     * task keeps its state and the process keeps running, so the agent socket
+     * keeps answering. False when there is no live activity or the move is refused.
+     */
+    public static boolean background(View host) {
+        Boolean done = onMain(() -> {
+            Activity activity = activity(host.getContext());
+            if (activity == null || activity.isFinishing()) return false;
+            return activity.moveTaskToBack(true);
+        });
+        return done != null && done;
+    }
+
+    /**
+     * Brings the surface's task back to the front with an intent into its own
+     * task. Answers null when the start is handed to the system, else the
+     * refusal's own words: Android may block an activity start while the app is
+     * in the background (background activity launch restrictions), and then the
+     * error says so.
+     */
+    public static String foreground(View host) {
+        return onMain(() -> {
+            Activity activity = activity(host.getContext());
+            if (activity == null) return "the surface has no activity";
+            Intent intent = new Intent(activity, activity.getClass());
+            intent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_NEW_TASK);
+            try {
+                activity.getApplicationContext().startActivity(intent);
+                return null;
+            } catch (RuntimeException refused) {
+                return refused.getClass().getSimpleName() + ": " + refused.getMessage();
+            }
+        }, "the main thread did not answer");
+    }
+
     /** Shows the keyboard for the focused input, or hides it from this window. */
     public static boolean keyboard(View host, boolean shown) {
         Boolean done = onMain(() -> {

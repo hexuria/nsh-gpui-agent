@@ -504,6 +504,14 @@ impl StrictNative for SystemActionNative {
             None => Ok(()),
         }
     }
+    fn background(&self) -> Result<(), String> {
+        self.records.calls.lock().unwrap().push("background");
+        Ok(())
+    }
+    fn foreground(&self) -> Result<(), String> {
+        self.records.calls.lock().unwrap().push("foreground");
+        Ok(())
+    }
 }
 
 impl GateNative {
@@ -882,6 +890,19 @@ fn rotate_and_keyboard_forward_arguments_and_errors() {
     assert_eq!(*records.rotations.lock().unwrap(), vec![true]);
     assert_eq!(*records.keyboards.lock().unwrap(), vec![false]);
     assert_eq!(*records.calls.lock().unwrap(), vec!["rotate", "keyboard"]);
+}
+
+#[test]
+fn background_and_foreground_reach_the_native_in_order() {
+    let (agent, records) = system_action_agent(false, None, None, None);
+
+    agent.background().unwrap();
+    agent.foreground().unwrap();
+
+    assert_eq!(
+        *records.calls.lock().unwrap(),
+        vec!["background", "foreground"]
+    );
 }
 
 fn two_window_agent() -> (Agent, Arc<WindowRecords>) {
