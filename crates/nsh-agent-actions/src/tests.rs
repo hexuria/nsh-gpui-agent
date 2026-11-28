@@ -192,6 +192,9 @@ impl Native for GateNative {
         self.pressed_at.lock().unwrap().push(at);
         if let Some(id) = GATE_FOCUS_ON_PRESS.with(std::cell::Cell::get) {
             GATE_FOCUSED.with(|focused| focused.set(Some(id)));
+        } else if let Ok(Some(hit)) = self.hit_node(at) {
+            // As a platform's press does: what it hits takes the focus.
+            GATE_FOCUSED.with(|focused| focused.set(Some(hit)));
         }
     }
     fn long_press(&self, at: Point<Points>, hold: Duration) {
@@ -264,12 +267,10 @@ thread_local! {
     static GATE_FOCUS_ON_PRESS: std::cell::Cell<Option<NodeId>> = const { std::cell::Cell::new(None) };
 }
 
-impl StrictNative for GateNative {
-    fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
-        Ok(GATE_KEYBOARD.with(std::cell::Cell::get))
-    }
-    fn hit_at(&self, at: Point<Points>) -> Result<Option<NodeId>, String> {
-        self.hits.lock().unwrap().push(at);
+impl GateNative {
+    /// The hit `hit_at` reports, without recording it (a press reads where
+    /// it fell for the focus it gives; the press itself is the action).
+    fn hit_node(&self, at: Point<Points>) -> Result<Option<NodeId>, String> {
         if let Some(windows) = &self.windows {
             let selected = *windows.selected.lock().unwrap();
             return Ok(self
@@ -282,6 +283,19 @@ impl StrictNative for GateNative {
                 .max());
         }
         self.hit.clone()
+    }
+}
+
+impl StrictNative for GateNative {
+    fn focus_known(&self) -> bool {
+        true
+    }
+    fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
+        Ok(GATE_KEYBOARD.with(std::cell::Cell::get))
+    }
+    fn hit_at(&self, at: Point<Points>) -> Result<Option<NodeId>, String> {
+        self.hits.lock().unwrap().push(at);
+        self.hit_node(at)
     }
     fn focus_node(&self, _: NodeId) -> Result<(), String> {
         if self.windows.is_none() {
@@ -300,12 +314,27 @@ struct SystemActionRecords {
     typed_text: Mutex<Vec<String>>,
     rotations: Mutex<Vec<bool>>,
     keyboards: Mutex<Vec<bool>>,
+    /// What [`Native::focused`] answered the moment each key or typed
+    /// text went out: proof the input had the focus before the keys.
+    focus_at_keys: Mutex<Vec<Option<NodeId>>>,
+    key_texts: Mutex<Vec<String>>,
 }
 
 struct SystemActionNative {
     bounds: std::collections::HashMap<NodeId, Bounds<Points>>,
     viewport: Size<Points>,
-    focused: Option<NodeId>,
+    focused: Mutex<Option<NodeId>>,
+    /// The focus a press asked for, delivered when the settle loop next
+    /// polls the platform (`animating`): a posted press's effect arrives
+    /// after the press returns, as on macOS.
+    pending_focus: Mutex<Option<NodeId>>,
+    press_focuses: bool,
+    /// The press's focus arrives only with the event loop (at the next
+    /// `animating` poll), not inside `press`.
+    focus_after_settle: bool,
+    /// Whether this native reports the focus at all: `false` models a
+    /// platform whose `focused` is the trait's default `None`.
+    reports_focus: bool,
     records: Arc<SystemActionRecords>,
     rotate_error: Option<&'static str>,
     keyboard_error: Option<&'static str>,
@@ -321,6 +350,15 @@ impl Native for SystemActionNative {
     fn press(&self, at: Point<Points>) {
         self.records.calls.lock().unwrap().push("press");
         self.records.presses.lock().unwrap().push(at);
+        if self.press_focuses
+            && let Some((id, _)) = self.bounds.iter().find(|(_, bounds)| bounds.contains(&at))
+        {
+            if self.focus_after_settle {
+                *self.pending_focus.lock().unwrap() = Some(*id);
+            } else {
+                *self.focused.lock().unwrap() = Some(*id);
+            }
+        }
     }
     fn long_press(&self, _: Point<Points>, _: Duration) {}
     fn scroll(&self, _: Point<Points>, _: Point<Points>) {}
@@ -328,17 +366,45 @@ impl Native for SystemActionNative {
     fn type_text(&self, text: &str) {
         self.records.calls.lock().unwrap().push("type");
         self.records
+            .focus_at_keys
+            .lock()
+            .unwrap()
+            .push(*self.focused.lock().unwrap());
+        self.records
             .typed_text
             .lock()
             .unwrap()
             .push(text.to_string());
     }
-    fn key(&self, _: Key) {}
+    fn key(&self, _: Key) {
+        self.records
+            .focus_at_keys
+            .lock()
+            .unwrap()
+            .push(*self.focused.lock().unwrap());
+    }
+    fn press_keys(&self, keys: &str) -> Result<(), String> {
+        self.records
+            .focus_at_keys
+            .lock()
+            .unwrap()
+            .push(*self.focused.lock().unwrap());
+        self.records
+            .key_texts
+            .lock()
+            .unwrap()
+            .push(keys.to_string());
+        Ok(())
+    }
     fn input_text(&self, _: NodeId) -> Option<String> {
         None
     }
     fn focused(&self) -> Option<NodeId> {
-        self.focused
+        if self.reports_focus {
+            *self.focused.lock().unwrap()
+        } else {
+            None
+        }
     }
     fn paste(&self, content: &nsh_core::PasteEvent) -> Result<(), String> {
         self.records.calls.lock().unwrap().push("paste");
@@ -356,6 +422,11 @@ impl Native for SystemActionNative {
         Ok(())
     }
     fn animating(&self) -> bool {
+        // The event loop's turn: a focus the press posted is delivered
+        // once the loop runs, never inside the press itself.
+        if let Some(id) = self.pending_focus.lock().unwrap().take() {
+            *self.focused.lock().unwrap() = Some(id);
+        }
         false
     }
     fn screenshot(&self) -> Result<Vec<u8>, String> {
@@ -371,6 +442,9 @@ impl Native for SystemActionNative {
 }
 
 impl StrictNative for SystemActionNative {
+    fn focus_known(&self) -> bool {
+        self.reports_focus
+    }
     fn rotate(&self, landscape: bool) -> Result<(), String> {
         self.records.calls.lock().unwrap().push("rotate");
         self.records.rotations.lock().unwrap().push(landscape);
@@ -445,6 +519,19 @@ fn system_action_agent(
     rotate_error: Option<&'static str>,
     keyboard_error: Option<&'static str>,
 ) -> (Agent, Arc<SystemActionRecords>) {
+    system_action_agent_with(input, focused, rotate_error, keyboard_error, true)
+}
+
+/// [`system_action_agent`]; `press_focuses` says whether a press inside the
+/// input gives it the focus, as a platform's does when its events are
+/// delivered in order.
+fn system_action_agent_with(
+    input: bool,
+    focused: Option<NodeId>,
+    rotate_error: Option<&'static str>,
+    keyboard_error: Option<&'static str>,
+    press_focuses: bool,
+) -> (Agent, Arc<SystemActionRecords>) {
     use nsh_core::{EventMask, InputConfig, MountItem, ViewKind, ViewProps};
 
     let model = Arc::new(Model::default());
@@ -488,12 +575,167 @@ fn system_action_agent(
     let native = SystemActionNative {
         bounds: [(2, frame)].into(),
         viewport: size(px(100.0), px(100.0)),
-        focused,
+        focused: Mutex::new(focused),
+        pending_focus: Mutex::new(None),
+        press_focuses,
+        focus_after_settle: false,
+        reports_focus: true,
         records: records.clone(),
         rotate_error,
         keyboard_error,
     };
     (Agent::new(model, Box::new(native)), records)
+}
+
+/// [`system_action_agent`], with the focus delivery and reporting of the
+/// platform tuned: `focus_after_settle` delivers a press's focus only at
+/// the event loop's next turn (a posted press, as macOS delivers it), and
+/// `reports_focus` false models a platform whose `focused` never answers
+/// (the trait's default `None`).
+fn system_action_agent_focus(
+    focus_after_settle: bool,
+    reports_focus: bool,
+) -> (Agent, Arc<SystemActionRecords>) {
+    use nsh_core::{EventMask, InputConfig, MountItem, ViewKind, ViewProps};
+
+    let model = Arc::new(Model::default());
+    let mut events = EventMask::default();
+    events.set(EventKind::Press, true);
+    let props = ViewProps {
+        test_id: Some("target".into()),
+        ..ViewProps::default()
+    };
+    let frame = Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0)));
+    let items = vec![
+        MountItem::Create {
+            id: 2,
+            kind: ViewKind::Input,
+        },
+        MountItem::Frame { id: 2, frame },
+        MountItem::Insert {
+            parent: 1,
+            child: 2,
+            before: None,
+        },
+        MountItem::Events { id: 2, events },
+        MountItem::ViewProps {
+            id: 2,
+            props: Box::new(props),
+        },
+        MountItem::Input {
+            id: 2,
+            config: Box::new(InputConfig::default()),
+        },
+    ];
+    model.apply(&MountBatch { items });
+
+    let records = Arc::new(SystemActionRecords::default());
+    let native = SystemActionNative {
+        bounds: [(2, frame)].into(),
+        viewport: size(px(100.0), px(100.0)),
+        focused: Mutex::new(None),
+        pending_focus: Mutex::new(None),
+        press_focuses: true,
+        focus_after_settle,
+        reports_focus,
+        records: records.clone(),
+        rotate_error: None,
+        keyboard_error: None,
+    };
+    (Agent::new(model, Box::new(native)), records)
+}
+
+#[test]
+fn type_node_proceeds_after_settle_when_the_platform_never_reports_focus() {
+    // nsh-gpui-agent#26 T1: a native whose `focused` never answers (the
+    // trait's default `None`) cannot prove the focus; type must not refuse
+    // it: the keys proceed once the press has settled.
+    let (agent, records) = system_action_agent_focus(false, false);
+
+    agent.type_node(2, "typed text").unwrap();
+
+    assert_eq!(
+        *records.typed_text.lock().unwrap(),
+        vec!["typed text".to_string()]
+    );
+}
+
+#[test]
+fn type_node_waits_for_the_focus_the_press_delivers() {
+    // macOS posts the press and sends keys at once: the focus the press
+    // means to make arrives only with the event loop. The keys must wait
+    // for it.
+    let (agent, records) = system_action_agent_focus(true, true);
+
+    agent.type_node(2, "typed text").unwrap();
+
+    assert_eq!(
+        *records.typed_text.lock().unwrap(),
+        vec!["typed text".to_string()]
+    );
+    assert!(
+        records
+            .focus_at_keys
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|focused| *focused == Some(2)),
+        "every key went out with the input focused: {:?}",
+        records.focus_at_keys.lock().unwrap()
+    );
+}
+
+#[test]
+fn set_value_node_waits_for_the_focus_the_press_delivers() {
+    let (agent, records) = system_action_agent_focus(true, true);
+
+    agent.set_value_node(2, "replacement").unwrap();
+
+    assert!(
+        !records.focus_at_keys.lock().unwrap().is_empty()
+            && records
+                .focus_at_keys
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|focused| *focused == Some(2)),
+        "select-all, the clear and the text went out with the input focused: {:?}",
+        records.focus_at_keys.lock().unwrap()
+    );
+}
+
+#[test]
+fn key_node_waits_for_the_focus_the_press_delivers() {
+    let (agent, records) = system_action_agent_focus(true, true);
+
+    agent.key_node(2, "enter").unwrap();
+
+    assert!(
+        !records.focus_at_keys.lock().unwrap().is_empty()
+            && records
+                .focus_at_keys
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|focused| *focused == Some(2)),
+        "the chord went out with the input focused: {:?}",
+        records.focus_at_keys.lock().unwrap()
+    );
+}
+
+#[test]
+fn the_focus_error_names_the_node_that_has_the_focus() {
+    // T1(c): a press that fails to focus the input while another node
+    // holds the focus names that node.
+    let (agent, records) = system_action_agent_with(true, Some(7), None, None, false);
+    let _ = records;
+
+    let error = agent.type_node(2, "typed text").unwrap_err();
+
+    assert!(
+        error.contains('7'),
+        "the error names the node that has the focus: {error}"
+    );
 }
 
 #[test]
@@ -556,6 +798,20 @@ fn type_node_focuses_an_unfocused_input_before_typing() {
         *records.typed_text.lock().unwrap(),
         vec!["typed text".to_string()]
     );
+}
+
+#[test]
+fn type_node_does_not_type_when_the_press_did_not_focus_the_input() {
+    // nsh-gpui-agent#14: a platform can deliver keys before the press that
+    // was meant to focus the input (macOS posts mouse events to the queue
+    // but sends keys synchronously), so the keys would land in whatever
+    // still holds the focus. `type` must prove the input is focused after
+    // its press and before the keys, or say it cannot.
+    let (agent, records) = system_action_agent_with(true, None, None, None, false);
+
+    assert!(agent.type_node(2, "typed text").is_err());
+
+    assert!(records.typed_text.lock().unwrap().is_empty());
 }
 
 #[test]

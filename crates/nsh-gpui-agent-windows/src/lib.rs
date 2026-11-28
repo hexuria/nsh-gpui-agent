@@ -175,6 +175,10 @@ impl WindowsNative {
 }
 
 impl StrictNative for WindowsNative {
+    fn focus_known(&self) -> bool {
+        true
+    }
+
     fn available(&self) -> bool {
         self.available.load(Ordering::Acquire)
     }

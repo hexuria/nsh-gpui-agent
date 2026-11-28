@@ -124,6 +124,10 @@ impl StrictNative for IosNative {
         self.alive.load(Ordering::Acquire)
     }
 
+    fn focus_known(&self) -> bool {
+        true
+    }
+
     fn app_focused(&self) -> bool {
         self.surface
             .with_views(|_, window, _| {
@@ -232,6 +236,9 @@ impl Native for IosNative {
     }
     fn paste(&self, content: &nsh_core::PasteEvent) -> Result<(), String> {
         self.native.paste(content)
+    }
+    fn focused(&self) -> Option<NodeId> {
+        self.native.focused()
     }
     fn type_text(&self, text: &str) {
         self.native.type_text(text);

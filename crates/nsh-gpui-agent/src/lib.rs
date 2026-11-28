@@ -1572,8 +1572,16 @@ mod tests {
         /// Whether the clipboard's text is the one asked, as the platform
         /// compares it.
         clip_text_is: Option<bool>,
-        /// The view the platform says has the focus.
-        focused: Option<NodeId>,
+        /// The view the platform says has the focus: a press inside the
+        /// input moves it there when `press_focuses`, as a platform's does.
+        focused: std::sync::Mutex<Option<NodeId>>,
+        /// Whether a press inside the input gives it the focus; false
+        /// models a platform whose focus stays where it was.
+        press_focuses: bool,
+        /// Whether the platform reports the focus at all; false models one
+        /// whose `focused` never answers, where the focus proof proceeds on
+        /// trust after the settle.
+        reports_focus: bool,
         /// The keystrokes pressed.
         keys: Arc<std::sync::Mutex<Vec<String>>>,
         /// Input 3's selection, as the platform holds it.
@@ -1598,7 +1606,9 @@ mod tests {
                 generation: None,
                 copies: true,
                 clip_text_is: None,
-                focused: None,
+                focused: std::sync::Mutex::new(None),
+                press_focuses: true,
+                reports_focus: true,
                 keys: Arc::default(),
                 selection: None,
                 selection_reads: Arc::default(),
@@ -1607,6 +1617,14 @@ mod tests {
     }
 
     impl StrictNative for SnapshotNative {
+        fn focus_known(&self) -> bool {
+            self.reports_focus
+        }
+
+        fn focus_node(&self, _: NodeId) -> Result<(), String> {
+            Ok(())
+        }
+
         fn available(&self) -> bool {
             self.available
         }
@@ -1695,6 +1713,12 @@ mod tests {
 
         fn press(&self, at: Point<Points>) {
             self.presses.lock().unwrap().push(at);
+            if self.press_focuses
+                && let Some(input) = self.bounds(3)
+                && input.contains(&at)
+            {
+                *self.focused.lock().unwrap() = Some(3);
+            }
         }
 
         fn long_press(&self, _: Point<Points>, _: std::time::Duration) {}
@@ -1707,7 +1731,11 @@ mod tests {
         fn type_text(&self, _: &str) {}
         fn key(&self, _: nsh_testing::agent::Key) {}
         fn focused(&self) -> Option<NodeId> {
-            self.focused
+            if self.reports_focus {
+                *self.focused.lock().unwrap()
+            } else {
+                None
+            }
         }
         fn input_text(&self, id: NodeId) -> Option<String> {
             (id == 3).then(|| self.input.clone()).flatten()
@@ -2172,7 +2200,8 @@ mod tests {
         nodes[2].enabled = true;
         let mut native = SnapshotNative::new(true, Some(String::new()), false);
         native.generation = Some(Arc::new(std::sync::atomic::AtomicU64::new(5)));
-        native.focused = Some(2);
+        native.press_focuses = false;
+        *native.focused.lock().unwrap() = Some(2);
         let keys = native.keys.clone();
         let mut host =
             snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);
@@ -2198,7 +2227,7 @@ mod tests {
             native.text_menu = nsh_agent_actions::TextMenu::from_strings(
                 &["selection", field, "cut", "copy", "select-all"].map(String::from),
             );
-            native.focused = focused;
+            *native.focused.lock().unwrap() = focused;
             let pressed = native.menu_presses.clone();
             let mut host =
                 snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);

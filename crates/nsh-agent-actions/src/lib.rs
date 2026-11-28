@@ -261,6 +261,14 @@ pub trait StrictNative: Native {
         let _ = keys;
         Ok(())
     }
+
+    /// Whether the platform reports what has the keyboard focus
+    /// ([`Native::focused`]): then `None` means nothing has it. `false` —
+    /// the platform cannot tell, its `focused` never answers — a focus
+    /// check proceeds once the press has settled.
+    fn focus_known(&self) -> bool {
+        false
+    }
     /// Focuses a text input without synthesizing a pointer press.
     fn focus_node(&self, id: NodeId) -> Result<(), String> {
         let _ = id;
@@ -1269,10 +1277,30 @@ impl Agent {
         // under the software keyboard (a person types into it there too):
         // only a press to focus it needs a point that is clear.
         if self.native.focused() != Some(id) {
-            self.press_to_focus(id, &node)?;
+            self.press_and_await_focus(id, &node)?;
         }
         self.native.type_text(text);
         self.settled()
+    }
+
+    /// After a press or a focus request meant to give input `id` the
+    /// focus: the focus once the gesture has settled. A platform that
+    /// cannot report the focus ([`StrictNative::focus_known`] false: its
+    /// `focused` never answers) is trusted once quiet, or every type on it
+    /// would refuse (hexuria/nsh-gpui-agent#26 T1). One that can must show
+    /// `id` focused; the error names the node that has the focus.
+    fn await_focused(&self, id: NodeId, what: &str) -> Result<(), String> {
+        self.settled()?;
+        match self.native.focused() {
+            Some(focused) if focused == id => Ok(()),
+            Some(other) => Err(format!(
+                "{what} did not give node {id} the focus: node {other} has it"
+            )),
+            None if self.native.focus_known() => Err(format!(
+                "{what} did not give node {id} the focus: nothing has it"
+            )),
+            None => Ok(()),
+        }
     }
 
     /// Presses input `id` (`node`) to give it the focus. An input under an
@@ -1282,11 +1310,19 @@ impl Agent {
     /// takes the press itself ([`Agent::overlay_passes`]); the point is
     /// re-hit-tested, and the press must then have given the input the
     /// focus. Any other occluder refuses the press.
-    fn press_to_focus(&self, id: NodeId, node: &SemanticNode) -> Result<(), String> {
+    fn press_and_await_focus(&self, id: NodeId, node: &SemanticNode) -> Result<(), String> {
         let error = match self.node_point(id) {
             Ok(at) => {
                 self.native.press(at);
-                return Ok(());
+                // The press is not the focus yet: a platform can hand the
+                // keys that follow to the input faster than it delivers
+                // the press (macOS posts mouse events to the app's queue
+                // but sends key events synchronously), and then the keys
+                // land in whatever still holds the focus
+                // (hexuria/nsh-gpui-agent#14). The keys wait until the
+                // input provably has the focus, as the overlay path below
+                // already required.
+                return self.await_focused(id, &format!("a press at ({}, {})", at.x.0, at.y.0));
             }
             Err(error) => error,
         };
@@ -1340,15 +1376,13 @@ impl Agent {
             None => return Err(error),
         }
         self.native.press(at);
-        self.settled()?;
-        if self.native.focused() == Some(id) {
-            Ok(())
-        } else {
-            Err(format!(
-                "{error}: a press on its overlay at ({}, {}) did not give node {id} the focus",
+        self.await_focused(
+            id,
+            &format!(
+                "{error}: a press on its overlay at ({}, {})",
                 at.x.0, at.y.0
-            ))
-        }
+            ),
+        )
     }
 
     /// Whether a press at `at` that natively hits `hit` passes through to
@@ -1413,7 +1447,7 @@ impl Agent {
             return Err(format!("node {id} is disabled"));
         }
         if self.native.focused() != Some(id) {
-            self.press_to_focus(id, &node)?;
+            self.press_and_await_focus(id, &node)?;
         }
         self.native.key(Key::SelectAll);
         self.native.key(Key::Backspace);
@@ -1451,10 +1485,15 @@ impl Agent {
         self.native.validate_keys(keys)?;
         // A focused input takes the keys where it is (see `type_node`).
         if !(node.input && self.native.focused() == Some(id)) {
-            let at = self.node_point(id)?;
+            // The node's window first, as every node action does: the focus
+            // and the keys go where the node is.
+            let _ = self.node_point(id)?;
             if let Err(error) = self.native.focus_node(id) {
                 if node.input && error == NATIVE_FOCUS_UNSUPPORTED {
-                    self.native.press(at);
+                    // A posted press, then keys sent at once, is the same
+                    // ordering fault as `type`'s (hexuria/nsh-gpui-agent#14):
+                    // the keys wait until the input provably has the focus.
+                    self.press_and_await_focus(id, node)?;
                 } else {
                     return Err(error);
                 }

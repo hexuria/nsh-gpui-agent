@@ -354,6 +354,10 @@ impl Native for AndroidStrictNative {
 }
 
 impl StrictNative for AndroidStrictNative {
+    fn focus_known(&self) -> bool {
+        true
+    }
+
     fn available(&self) -> bool {
         self.alive.load(Ordering::Acquire)
     }

@@ -87,6 +87,10 @@ struct LinuxNative {
 }
 
 impl StrictNative for LinuxNative {
+    fn focus_known(&self) -> bool {
+        true
+    }
+
     fn available(&self) -> bool {
         self.alive.load(Ordering::Acquire)
     }
