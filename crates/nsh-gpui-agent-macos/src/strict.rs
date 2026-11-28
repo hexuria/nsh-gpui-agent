@@ -152,6 +152,10 @@ fn pad_owner(surface: &Rc<Surface>, hit: &NSView) -> Option<NodeId> {
 }
 
 impl StrictNative for MacStrictNative {
+    fn focus_known(&self) -> bool {
+        true
+    }
+
     fn available(&self) -> bool {
         self.alive.load(Ordering::Acquire)
     }
