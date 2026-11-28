@@ -500,7 +500,9 @@ impl StrictNative for AndroidStrictNative {
         });
         match answer {
             Some(refused) if refused.is_empty() => Ok(()),
-            Some(refused) => Err(format!("Android refused to bring the task forward: {refused}")),
+            Some(refused) => Err(format!(
+                "Android refused to bring the task forward: {refused}"
+            )),
             None => Err(self
                 .main_failure("foreground start")
                 .unwrap_or_else(|| "Android gave no answer to the foreground start".into())),
