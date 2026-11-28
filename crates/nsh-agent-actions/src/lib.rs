@@ -831,6 +831,13 @@ fn press_strict() -> bool {
 }
 
 /// `error`, naming how many scrolls towards the middle a refusal followed.
+/// The view an `occluded_by: <id>` refusal names (the core's own text, before an adapter names it for people).
+fn occluder_of(error: &str) -> Option<NodeId> {
+    let rest = error.strip_prefix("occluded_by: ")?;
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    rest[..digits].parse().ok()
+}
+
 fn after_scrolls(error: String, scrolled: usize) -> String {
     if scrolled == 0 {
         error
@@ -2457,7 +2464,8 @@ impl Agent {
                     {
                         return Err(after_scrolls(error, scrolled));
                     }
-                    let moved = match self.scroll_towards_middle(native_owner) {
+                    let moved = match self.scroll_towards_middle(native_owner, occluder_of(&error))
+                    {
                         Ok(moved) => moved,
                         Err(scroll_error) => return Err(after_scrolls(scroll_error, scrolled)),
                     };
@@ -2814,7 +2822,9 @@ impl Agent {
     /// it. Answers whether a gesture went: a view whose scroll views cannot
     /// move it that way (the content's end, no scroll view around it) is
     /// left where it is, and so is one already at the middle.
-    fn scroll_towards_middle(&self, id: NodeId) -> Result<bool, String> {
+    /// `occluder`, the view that refused the press, is never where the gesture starts: a popover or dropdown inside
+    /// the page is a descendant of the scroller too, and dragging it would scroll its own list, not clear the target.
+    fn scroll_towards_middle(&self, id: NodeId, occluder: Option<NodeId>) -> Result<bool, String> {
         let scrollers = self.scene.scroll_ancestors(id)?;
         let Some(bounds) = self.native.bounds(id) else {
             return Ok(false);
@@ -2860,7 +2870,11 @@ impl Agent {
                 let nodes = self.scene.semantic_tree()?;
                 let parents = mounted_parents(&nodes);
                 match self.native.hit_at(middle)? {
-                    Some(hit) if is_descendant_or_same(hit, scroller, &parents) => {}
+                    Some(hit)
+                        if is_descendant_or_same(hit, scroller, &parents)
+                            && !occluder.is_some_and(|cover| {
+                                is_descendant_or_same(hit, cover, &parents)
+                            }) => {}
                     _ => return Ok(false),
                 }
             }

@@ -4110,6 +4110,55 @@ fn a_drag_start_covered_by_a_dialog_leaves_the_page_unscrolled() {
 }
 
 #[test]
+fn a_cover_inside_the_scroller_is_never_dragged_to_clear_the_target() {
+    // A popover or dropdown inside the page (node 9, a child of the scroller 5) covers the target and the
+    // scroller's middle: dragging there would scroll the popover's own list, so the page is left as it is.
+    let _strict_env_lock = STRICT_ENV_LOCK.lock().unwrap();
+    GATE_SCROLLED.with(|scrolled| scrolled.set(false));
+    GATE_HIT_AFTER_SCROLL.with(|hit| hit.set(None));
+    let (mut nodes, target) = covered_low_nodes();
+    nodes.iter_mut().find(|node| node.id == 9).unwrap().parent = Some(5);
+    let full = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(100.0)));
+    let presses = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let agent = Agent::requiring_native_hit_test(
+        scrolling_scene(nodes),
+        Box::new(GateNative {
+            windows: None,
+            bounds: [(2, target), (5, full), (9, full)].into(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(9)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: presses.clone(),
+            pressed_at: Arc::new(Mutex::new(Vec::new())),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: size(px(100.0), px(100.0)),
+        }),
+    );
+
+    let error = agent.press_node(2).unwrap_err();
+
+    assert!(error.starts_with("occluded_by: 9"), "{error}");
+    assert!(!error.contains("scroll(s) towards the middle"), "{error}");
+    assert!(!GATE_SCROLLED.with(std::cell::Cell::get));
+    assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn an_occluder_is_read_from_the_cores_refusal() {
+    assert_eq!(occluder_of("occluded_by: 9"), Some(9));
+    assert_eq!(
+        occluder_of("occluded_by: 12 after 1 scroll(s) towards the middle"),
+        Some(12)
+    );
+    assert_eq!(
+        occluder_of("occluded_by: software keyboard (a press …)"),
+        None
+    );
+    assert_eq!(occluder_of("`node 3` is offscreen"), None);
+}
+
+#[test]
 fn an_input_press_to_focus_scrolls_clear_before_the_press_and_focus_wait() {
     let _strict_env_lock = STRICT_ENV_LOCK.lock().unwrap();
     GATE_SCROLLED.with(|scrolled| scrolled.set(false));
