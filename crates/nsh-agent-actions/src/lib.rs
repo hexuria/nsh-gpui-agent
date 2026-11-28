@@ -320,6 +320,13 @@ pub trait StrictNative: Native {
     fn foreground(&self) -> Result<(), String> {
         Err("foreground is not supported on this platform".into())
     }
+    /// Whether the app is in the foreground now: its activity resumed and
+    /// its window focused. The agent polls this after a foreground start
+    /// because a start the system blocks can be dropped silently, answering
+    /// no error of its own.
+    fn foregrounded(&self) -> Result<bool, String> {
+        Err("foregrounded is not supported on this platform".into())
+    }
     /// Whether the window shows the app laid out at its current size: an
     /// error while it has no size (minimized) or a resize is still being
     /// laid out.
@@ -1326,9 +1333,24 @@ impl Agent {
     }
 
     /// Brings the app back to the foreground and waits for the resulting
-    /// state.
+    /// state. Since Android 10 a background activity start the system
+    /// blocks is dropped silently, not thrown, so this is never Ok without
+    /// the platform seeing the app forward first.
     pub fn foreground(&self) -> Result<(), String> {
-        self.native.foreground().and_then(|()| self.settled())
+        self.native.foreground()?;
+        let start = Instant::now();
+        loop {
+            if self.native.foregrounded()? {
+                return self.settled();
+            }
+            if start.elapsed() >= SETTLE {
+                return Err(
+                    "the system blocked or ignored the foreground request; the app is still in the background"
+                        .into(),
+                );
+            }
+            std::thread::sleep(POLL);
+        }
     }
 
     /// Types `text` into input `id`, focusing it first when needed, and waits for the resulting state.

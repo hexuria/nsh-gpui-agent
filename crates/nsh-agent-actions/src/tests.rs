@@ -351,6 +351,12 @@ impl StrictNative for GateNative {
 
 #[derive(Default)]
 struct SystemActionRecords {
+    /// The foreground state the platform reports, and whether its system
+    /// drops a background activity start silently: the fake's model of the
+    /// Android 10+ block. `foreground` sets `forward` only while
+    /// `system_blocks_foreground_start` is off.
+    forward: std::sync::atomic::AtomicBool,
+    system_blocks_foreground_start: std::sync::atomic::AtomicBool,
     calls: Mutex<Vec<&'static str>>,
     presses: Mutex<Vec<Point<Points>>>,
     pastes: Mutex<Vec<String>>,
@@ -510,7 +516,22 @@ impl StrictNative for SystemActionNative {
     }
     fn foreground(&self) -> Result<(), String> {
         self.records.calls.lock().unwrap().push("foreground");
+        if !self
+            .records
+            .system_blocks_foreground_start
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.records
+                .forward
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         Ok(())
+    }
+    fn foregrounded(&self) -> Result<bool, String> {
+        Ok(self
+            .records
+            .forward
+            .load(std::sync::atomic::Ordering::SeqCst))
     }
 }
 
@@ -902,6 +923,42 @@ fn background_and_foreground_reach_the_native_in_order() {
     assert_eq!(
         *records.calls.lock().unwrap(),
         vec!["background", "foreground"]
+    );
+}
+
+/// Since Android 10 a background activity start the system blocks is
+/// dropped silently, not thrown: the start answers no error, so the agent
+/// must never answer Ok without seeing the app forward. A fake whose
+/// system ignores the start (the app stays in the background) gets the
+/// error instead.
+#[test]
+fn foreground_while_the_app_stays_in_the_background_is_an_error_not_ok() {
+    let (agent, records) = system_action_agent(false, None, None, None);
+    records
+        .system_blocks_foreground_start
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let error = agent
+        .foreground()
+        .expect_err("a start the system ignored is never Ok");
+
+    assert!(
+        error.contains("still in the background"),
+        "the error says the app never came forward: {error}"
+    );
+}
+
+/// The same check passes when the system honors the start: the fake's
+/// foreground brings the app forward and the answer is Ok.
+#[test]
+fn foreground_when_the_app_comes_forward_is_ok() {
+    let (agent, records) = system_action_agent(false, None, None, None);
+
+    agent.foreground().unwrap();
+
+    assert!(
+        records.forward.load(std::sync::atomic::Ordering::SeqCst),
+        "the fake's system honored the start"
     );
 }
 

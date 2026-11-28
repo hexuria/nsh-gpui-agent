@@ -558,6 +558,24 @@ public final class AgentBridge {
         }, "the main thread did not answer");
     }
 
+    /**
+     * Whether the app is in the foreground: the activity resumed and its window
+     * focused. A background activity start the system blocks is dropped silently
+     * since Android 10, so this is the only proof a foreground start worked.
+     */
+    public static boolean foregrounded(View host) {
+        Boolean forward = onMain(() -> {
+            Activity activity = activity(host.getContext());
+            if (activity == null) return false;
+            View decor = activity.getWindow() == null ? null : activity.getWindow().getDecorView();
+            return !activity.isFinishing()
+                    && !activity.isDestroyed()
+                    && decor != null
+                    && decor.hasWindowFocus();
+        });
+        return forward != null && forward;
+    }
+
     /** Shows the keyboard for the focused input, or hides it from this window. */
     public static boolean keyboard(View host, boolean shown) {
         Boolean done = onMain(() -> {

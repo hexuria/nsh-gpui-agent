@@ -509,6 +509,26 @@ impl StrictNative for AndroidStrictNative {
         }
     }
 
+    /// The bridge answers whether the activity is resumed and its window
+    /// focused: the only proof a foreground start was not silently dropped.
+    fn foregrounded(&self) -> Result<bool, String> {
+        let answer: Option<bool> = self.call(|env, class, view| {
+            let forward = env
+                .call_static_method(
+                    class,
+                    "foregrounded",
+                    "(Landroid/view/View;)Z",
+                    &[JValue::Object(view)],
+                )?
+                .z()?;
+            Ok(Some(forward))
+        });
+        answer.ok_or_else(|| {
+            self.main_failure("foreground check")
+                .unwrap_or_else(|| "Android gave no answer to the foreground check".into())
+        })
+    }
+
     fn input_selections(&self, asked: &[NodeId]) -> std::collections::HashMap<NodeId, (u32, u32)> {
         let ids: Vec<i32> = asked
             .iter()
