@@ -100,21 +100,35 @@ impl Drop for TokenFile {
     }
 }
 
+/// Writes this run's token at `path`, replacing whatever is there: a token a finished or killed run left behind would
+/// otherwise stop every later run (the host reads the file once and removes it, so nothing else lives there). The token
+/// goes to a private file beside `path` first and is renamed over it, so the host never reads a partial one; each run
+/// removes only its own token afterwards ([`TokenFile`]), so a replacement launch keeps its own.
 #[cfg(unix)]
 fn write_token(path: PathBuf, token: &str) -> Result<TokenFile, String> {
     use std::os::unix::fs::OpenOptionsExt;
     check_token(token)?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let staged = path.with_file_name(format!(".gpui-agent-token.{}.{nanos}", std::process::id()));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(&path)
+        .open(&staged)
         .map_err(|e| format!("create private token file: {e}"))?;
-    if let Err(e) = file.write_all(token.as_bytes()) {
-        // `create_new` made it ours: a failed write leaves an empty or
-        // partial file every relaunch would reject.
-        let _ = fs::remove_file(&path);
-        return Err(format!("write private token file: {e}"));
+    let written = file
+        .write_all(token.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("write private token file: {e}"))
+        .and_then(|()| {
+            fs::rename(&staged, &path).map_err(|e| format!("place private token file: {e}"))
+        });
+    if let Err(error) = written {
+        let _ = fs::remove_file(&staged);
+        return Err(error);
     }
     Ok(TokenFile {
         path,
@@ -306,7 +320,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn token_files_are_private_one_use_and_collision_safe() {
+    fn a_runs_token_replaces_a_stale_one_privately_and_each_run_removes_only_its_own() {
         use std::os::unix::fs::PermissionsExt;
         let directory =
             std::env::temp_dir().join(format!("ios-launch-token-{}", std::process::id()));
@@ -314,15 +328,22 @@ mod tests {
         let path = directory.join("token");
         assert!(write_token(path.clone(), "").is_err());
         assert!(!path.exists());
-        let guard = write_token(path.clone(), "first").unwrap();
+        // A finished run's file, left behind: this run's token replaces it.
+        fs::write(&path, "stale").unwrap();
+        let first = write_token(path.clone(), "first").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first");
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert!(write_token(path.clone(), "second").is_err());
-        assert_eq!(fs::read_to_string(&path).unwrap(), "first");
-        drop(guard);
+        // A replacement launch writes its own; the first run's cleanup leaves it.
+        let second = write_token(path.clone(), "second").unwrap();
+        drop(first);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "second");
+        drop(second);
         assert!(!path.exists());
+        // Nothing staged is left beside it, and a folder that does not exist is an error.
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
         assert!(write_token(directory.join("missing/token"), "valid").is_err());
         fs::remove_dir(directory).unwrap();
     }

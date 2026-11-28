@@ -253,6 +253,12 @@ impl nsh_agent_actions::StrictNative for TabNative {
         self.server.has_tester()
     }
 
+    /// The page reports its focus ([`Native::focused`], the scene's): `None` there means nothing has it, so a press
+    /// that leaves nothing focused is refused rather than typed into nowhere.
+    fn focus_known(&self) -> bool {
+        true
+    }
+
     fn hit_at(&self, at: Point<Points>) -> Result<Option<NodeId>, String> {
         self.scene.hit_at(at)
     }
@@ -292,6 +298,15 @@ fn key_pair(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_tab_reports_its_focus() {
+        use nsh_agent_actions::StrictNative as _;
+        let server = std::sync::Arc::new(
+            DevServer::start("127.0.0.1:0".parse().unwrap(), "test", None, |_| {}).unwrap(),
+        );
+        assert!(TabNative::new(server).focus_known());
+    }
 
     #[test]
     fn dispatched_keys_release_even_when_the_default_is_unsupported() {
