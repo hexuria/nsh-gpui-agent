@@ -271,6 +271,14 @@ impl NshAgentHost {
                 action: gpui_agent::SystemAction::KeyboardHide,
                 ..
             } => self.agent.keyboard(false).map(|()| DispatchResult::empty()),
+            Op::System {
+                action: gpui_agent::SystemAction::Background,
+                ..
+            } => self.agent.background().map(|()| DispatchResult::empty()),
+            Op::System {
+                action: gpui_agent::SystemAction::Foreground,
+                ..
+            } => self.agent.foreground().map(|()| DispatchResult::empty()),
             Op::Swipe {
                 target,
                 direction,
@@ -495,6 +503,8 @@ impl NshAgentHost {
                     "system.rotate",
                     "system.keyboard_show",
                     "system.keyboard_hide",
+                    "system.background",
+                    "system.foreground",
                 ]);
             }
         }
@@ -2587,11 +2597,35 @@ mod tests {
             "system.rotate",
             "system.keyboard_show",
             "system.keyboard_hide",
+            "system.background",
+            "system.foreground",
         ] {
             assert_eq!(
                 hello.features.iter().any(|name| name == feature),
                 cfg!(target_os = "android"),
                 "{feature}"
+            );
+        }
+    }
+
+    #[test]
+    fn system_background_and_foreground_dispatch_to_the_native() {
+        for action in [
+            gpui_agent::SystemAction::Background,
+            gpui_agent::SystemAction::Foreground,
+        ] {
+            let mut host = snapshot_host(SnapshotScene(Ok(sample_nodes()), 1, Default::default()));
+            let answer = host.dispatch(&Op::System {
+                action,
+                value: None,
+            });
+            // The test native has no lifecycle operations of its own, so
+            // the platform default answers: the dispatch reached the native
+            // rather than an unsupported_op at the adapter.
+            let error = answer.unwrap_err();
+            assert!(
+                error.contains("not supported on this platform"),
+                "{action:?}: {error}"
             );
         }
     }

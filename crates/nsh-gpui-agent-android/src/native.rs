@@ -456,6 +456,79 @@ impl StrictNative for AndroidStrictNative {
             .unwrap_or_else(|| "Android could not change the requested orientation".into()))
     }
 
+    /// `moveTaskToBack(true)` on the surface's activity: the task keeps its
+    /// state and the process keeps running, so the agent socket keeps
+    /// answering while the app is in the background.
+    fn background(&self) -> Result<(), String> {
+        let done = self.call(|env, class, view| {
+            env.call_static_method(
+                class,
+                "background",
+                "(Landroid/view/View;)Z",
+                &[JValue::Object(view)],
+            )?
+            .z()
+        });
+        if done {
+            return Ok(());
+        }
+        Err(self
+            .main_failure("background move")
+            .unwrap_or_else(|| "Android refused to move the task to the back".into()))
+    }
+
+    /// An intent into the task's own activity with REORDER_TO_FRONT. Android
+    /// may refuse an activity start while the app is in the background: the
+    /// bridge then answers the refusal's own words, and this passes them on.
+    fn foreground(&self) -> Result<(), String> {
+        // `None` is no answer at all (the env or the agent is gone), a null
+        // string is success, anything else is the refusal's own words.
+        let answer: Option<String> = self.call(|env, class, view| {
+            let answer = env
+                .call_static_method(
+                    class,
+                    "foreground",
+                    "(Landroid/view/View;)Ljava/lang/String;",
+                    &[JValue::Object(view)],
+                )?
+                .l()?;
+            if answer.is_null() {
+                return Ok(Some(String::new()));
+            }
+            let answer = JString::from(answer);
+            Ok(Some(env.get_string(&answer)?.into()))
+        });
+        match answer {
+            Some(refused) if refused.is_empty() => Ok(()),
+            Some(refused) => Err(format!(
+                "Android refused to bring the task forward: {refused}"
+            )),
+            None => Err(self
+                .main_failure("foreground start")
+                .unwrap_or_else(|| "Android gave no answer to the foreground start".into())),
+        }
+    }
+
+    /// The bridge answers whether the activity is resumed and its window
+    /// focused: the only proof a foreground start was not silently dropped.
+    fn foregrounded(&self) -> Result<bool, String> {
+        let answer: Option<bool> = self.call(|env, class, view| {
+            let forward = env
+                .call_static_method(
+                    class,
+                    "foregrounded",
+                    "(Landroid/view/View;)Z",
+                    &[JValue::Object(view)],
+                )?
+                .z()?;
+            Ok(Some(forward))
+        });
+        answer.ok_or_else(|| {
+            self.main_failure("foreground check")
+                .unwrap_or_else(|| "Android gave no answer to the foreground check".into())
+        })
+    }
+
     fn input_selections(&self, asked: &[NodeId]) -> std::collections::HashMap<NodeId, (u32, u32)> {
         let ids: Vec<i32> = asked
             .iter()
