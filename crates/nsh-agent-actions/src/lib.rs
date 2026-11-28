@@ -792,6 +792,9 @@ pub struct Agent {
     /// The clipboard generation a copy or cut chord this agent pressed
     /// wrote ([`StrictNative::clipboard_generation`]).
     agent_clip: std::sync::Mutex<Option<u64>>,
+    /// Gestures that scrolled an occluded target clear since the host last took the count ([`Agent::take_scrolls`]):
+    /// any verb that presses or reaches a node can scroll, not only a press.
+    scrolls: std::sync::atomic::AtomicUsize,
 }
 
 /// How long the software keyboard's frame must stay the same before it
@@ -881,6 +884,7 @@ impl Agent {
             require_hit_test: false,
             keyboard: std::sync::Mutex::default(),
             agent_clip: std::sync::Mutex::default(),
+            scrolls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -895,6 +899,7 @@ impl Agent {
             require_hit_test: true,
             keyboard: std::sync::Mutex::default(),
             agent_clip: std::sync::Mutex::default(),
+            scrolls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1104,6 +1109,13 @@ impl Agent {
 
     /// [`Agent::press_node`], answering how many scroll gestures clearing an
     /// occluding floating cover the press took.
+    /// How many gestures scrolled an occluded target clear since the last call, and zero again (#28): a host takes it
+    /// before and after each request and reports it with whatever verb ran, so a `type`, `key` or `set_value` that
+    /// scrolled to reach its field says so as a click does.
+    pub fn take_scrolls(&self) -> usize {
+        self.scrolls.swap(0, std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn press_node_reporting_scrolls(&self, id: NodeId) -> Result<usize, String> {
         self.settled_and_keyboard()?;
         let selector = format!("node {id}");
@@ -2879,6 +2891,8 @@ impl Agent {
                 }
             }
             self.native.scroll(middle, point(Points(0.0), Points(step)));
+            self.scrolls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.stopped(id)?;
             return Ok(true);
         }

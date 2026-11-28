@@ -380,12 +380,15 @@ impl AgentHost for NshAgentHost {
     fn dispatch(&mut self, op: &Op) -> Result<DispatchResult, String> {
         self.require_available()?;
         let _ = self.agent.take_native_failure();
+        let _ = self.agent.take_scrolls();
         let result =
             self.dispatch_available(op)
                 .map_err(|error| match self.agent.semantic_nodes() {
                     Ok(nodes) => name_occluder(error, &nodes),
                     Err(_) => error,
                 });
+        // Any verb may have scrolled its target clear of a cover first: the result says how often, whatever ran.
+        let result = result.map(|result| with_scrolls(result, self.agent.take_scrolls()));
         if let Some(failure) = self.agent.take_native_failure() {
             return Err(failure);
         }
@@ -741,6 +744,25 @@ fn name_occluder(error: String, nodes: &[SemanticNode]) -> String {
         _ => leaf.clone(),
     };
     format!("occluded_by: {named}{}", &rest[digits..])
+}
+
+/// `result` with `"scrolled": n` when the request scrolled an occluded target clear `n` times (#28). An object result
+/// gains the field (a press already carrying it keeps its own); no result becomes `{"scrolled": n}`. A result of
+/// another shape is left as it is: no verb that can scroll answers one.
+fn with_scrolls(result: DispatchResult, scrolled: usize) -> DispatchResult {
+    if scrolled == 0 {
+        return result;
+    }
+    match result.value {
+        None => DispatchResult::json(serde_json::json!({ "scrolled": scrolled })),
+        Some(serde_json::Value::Object(mut fields)) => {
+            fields
+                .entry("scrolled")
+                .or_insert_with(|| serde_json::json!(scrolled));
+            DispatchResult::json(serde_json::Value::Object(fields))
+        }
+        Some(other) => DispatchResult::json(other),
+    }
 }
 
 fn stable_ids(nodes: &[SemanticNode]) -> HashMap<NodeId, String> {
@@ -2651,6 +2673,110 @@ mod tests {
 
         assert_eq!(scrolls.lock().unwrap().len(), 1);
         assert_eq!(result.value, Some(serde_json::json!({"scrolled": 1})));
+    }
+
+    /// A host whose input `visible` (node 3, inside the scroller 42) sits under a cover (9) until one scroll, or under it
+    /// for good when `clears` is false: it, and the scrolls made.
+    fn input_under_a_cover(
+        clears: bool,
+    ) -> (
+        NshAgentHost,
+        Arc<std::sync::Mutex<Vec<(Point<Points>, Point<Points>)>>>,
+    ) {
+        let mut nodes = sample_nodes();
+        let visible = nodes.iter_mut().find(|node| node.id == 3).unwrap();
+        visible.enabled = true;
+        visible.input = true;
+        visible.role = "textbox".into();
+        visible.parent = Some(42);
+        let mut scroller = SemanticNode::default();
+        scroller.id = 42;
+        scroller.parent = Some(1);
+        scroller.test_id = Some("scroller".into());
+        scroller.scroll = true;
+        let mut cover = SemanticNode::default();
+        cover.id = 9;
+        cover.parent = Some(1);
+        cover.test_id = Some("cover".into());
+        nodes.push(scroller);
+        nodes.push(cover);
+        let mut native = SnapshotNative::new(true, Some(String::new()), false);
+        native.hit = Some(9);
+        native.hit_after_scroll = Some(if clears { 3 } else { 9 });
+        let scrolls = native.scrolls.clone();
+        let host =
+            snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);
+        (host, scrolls)
+    }
+
+    fn set_value(target: &str, value: &str) -> Op {
+        serde_json::from_value(
+            serde_json::json!({"op": "set_value", "target": target, "value": value}),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn every_verb_that_scrolled_its_target_clear_says_so() {
+        // Type, key with a target and set_value press their field first, through the same retry as a click: a
+        // step that scrolled to reach it must say so, or a recipe written to fail there could pass unseen.
+        for (verb, op) in [
+            ("type", Op::type_text("visible", "x")),
+            ("key", Op::key("visible", "Tab")),
+            ("set_value", set_value("visible", "x")),
+        ] {
+            let (mut host, scrolls) = input_under_a_cover(true);
+            let result = host.dispatch(&op).unwrap();
+            assert_eq!(scrolls.lock().unwrap().len(), 1, "{verb}");
+            assert_eq!(
+                result.value,
+                Some(serde_json::json!({"scrolled": 1})),
+                "{verb}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_verb_refused_after_scrolling_says_how_often() {
+        for (verb, op) in [
+            ("type", Op::type_text("visible", "x")),
+            ("key", Op::key("visible", "Tab")),
+            ("set_value", set_value("visible", "x")),
+        ] {
+            let (mut host, _) = input_under_a_cover(false);
+            let error = host.dispatch(&op).unwrap_err();
+            assert!(error.starts_with("occluded_by: cover"), "{verb}: {error}");
+            assert!(
+                error.contains("scroll(s) towards the middle"),
+                "{verb}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_that_did_not_scroll_reports_nothing_and_the_count_starts_over() {
+        let (mut host, _) = input_under_a_cover(true);
+        host.dispatch(&Op::type_text("visible", "x")).unwrap();
+        // The field is clear now: the next request scrolls nothing and says nothing of the last one's scroll.
+        let result = host.dispatch(&Op::type_text("visible", "y")).unwrap();
+        assert_eq!(result.value, None);
+    }
+
+    #[test]
+    fn a_scroll_count_joins_a_result_without_replacing_it() {
+        let empty = with_scrolls(DispatchResult::empty(), 2);
+        assert_eq!(empty.value, Some(serde_json::json!({"scrolled": 2})));
+        let object = with_scrolls(
+            DispatchResult::json(serde_json::json!({"changed": true})),
+            1,
+        );
+        assert_eq!(
+            object.value,
+            Some(serde_json::json!({"changed": true, "scrolled": 1}))
+        );
+        let own = with_scrolls(DispatchResult::json(serde_json::json!({"scrolled": 1})), 1);
+        assert_eq!(own.value, Some(serde_json::json!({"scrolled": 1})));
+        assert_eq!(with_scrolls(DispatchResult::empty(), 0).value, None);
     }
 
     /// A host over the sample tree whose `visible` (node 3, 10 by 10 at
