@@ -10,6 +10,8 @@ use nsh_testing::agent::{Activity, Model, RemoteScene};
 
 use super::*;
 
+static STRICT_ENV_LOCK: Mutex<()> = Mutex::new(());
+
 fn pick_value(pick: Pick) -> serde_json::Value {
     match pick {
         Pick::One(id) => serde_json::json!({ "one": id }),
@@ -177,10 +179,24 @@ impl Native for GateNative {
         Ok(())
     }
     fn bounds(&self, id: NodeId) -> Option<Bounds<Points>> {
-        self.bounds.get(&id).copied()
+        let mut bounds = self.bounds.get(&id).copied()?;
+        if GATE_SCROLLED.with(std::cell::Cell::get)
+            && GATE_SCROLL_MOVES.with(std::cell::Cell::get)
+            && matches!(id, 2 | 4)
+        {
+            bounds.origin.y = Points(bounds.origin.y.0 - 20.0);
+        }
+        Some(bounds)
     }
     fn text_bounds(&self, id: NodeId, start: u32, end: u32) -> Option<Bounds<Points>> {
-        self.text_bounds.get(&(id, start, end)).copied()
+        let mut bounds = self.text_bounds.get(&(id, start, end)).copied()?;
+        if GATE_SCROLLED.with(std::cell::Cell::get)
+            && GATE_SCROLL_MOVES.with(std::cell::Cell::get)
+            && id == 4
+        {
+            bounds.origin.y = Points(bounds.origin.y.0 - 20.0);
+        }
+        Some(bounds)
     }
     fn viewport(&self) -> Size<Points> {
         self.viewport
@@ -265,6 +281,10 @@ thread_local! {
     /// moves out from over the target).
     static GATE_SCROLLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static GATE_HIT_AFTER_SCROLL: std::cell::Cell<Option<NodeId>> = const { std::cell::Cell::new(None) };
+    /// Whether this test's scroll gesture moves the scrolled content (a
+    /// cover at the end of a scroll view can stay over the target even
+    /// after the gesture).
+    static GATE_SCROLL_MOVES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 thread_local! {
@@ -296,6 +316,14 @@ impl GateNative {
             && let Some(hit) = GATE_HIT_AFTER_SCROLL.with(std::cell::Cell::get)
         {
             return Ok(Some(hit));
+        }
+        if self.hit == Ok(Some(9))
+            && self
+                .bounds
+                .get(&9)
+                .is_some_and(|cover| !cover.contains(&at))
+        {
+            return Ok(Some(5));
         }
         self.hit.clone()
     }
@@ -3960,7 +3988,9 @@ fn covered_low_nodes() -> (Vec<SemanticNode>, Bounds<Points>) {
 
 #[test]
 fn a_press_occluded_by_a_floating_cover_scrolls_the_target_clear_and_presses() {
+    let _strict_env_lock = STRICT_ENV_LOCK.lock().unwrap();
     GATE_SCROLLED.with(|scrolled| scrolled.set(false));
+    GATE_SCROLL_MOVES.with(|moves| moves.set(true));
     GATE_HIT_AFTER_SCROLL.with(|hit| hit.set(Some(2)));
     let (nodes, target) = covered_low_nodes();
     let full = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(100.0)));
@@ -3985,6 +4015,141 @@ fn a_press_occluded_by_a_floating_cover_scrolls_the_target_clear_and_presses() {
     agent.press_node(2).unwrap();
     assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 1);
     GATE_HIT_AFTER_SCROLL.with(|hit| hit.set(None));
+    GATE_SCROLL_MOVES.with(|moves| moves.set(false));
+    GATE_SCROLLED.with(|scrolled| scrolled.set(false));
+}
+
+#[test]
+fn a_scroll_cleared_press_on_a_text_span_keeps_its_word() {
+    let _strict_env_lock = STRICT_ENV_LOCK.lock().unwrap();
+    GATE_SCROLLED.with(|scrolled| scrolled.set(false));
+    GATE_SCROLL_MOVES.with(|moves| moves.set(true));
+    GATE_HIT_AFTER_SCROLL.with(|hit| hit.set(Some(4)));
+    let owner = Bounds::new(point(px(10.0), px(60.0)), size(px(80.0), px(30.0)));
+    let word_before_scroll = Bounds::new(point(px(20.0), px(70.0)), size(px(10.0), px(10.0)));
+    let word_after_scroll = Bounds::new(point(px(20.0), px(50.0)), size(px(10.0), px(10.0)));
+    let full = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(100.0)));
+    let nodes = vec![
+        semantic_node(1, None, false, SemanticTarget::View),
+        semantic_node(5, Some(1), false, SemanticTarget::View),
+        semantic_node(4, Some(5), false, SemanticTarget::View),
+        semantic_node(
+            11,
+            Some(4),
+            true,
+            SemanticTarget::Text {
+                owner: 4,
+                start: 5,
+                end: 9,
+            },
+        ),
+        semantic_node(9, Some(1), false, SemanticTarget::View),
+    ];
+    let pressed_at = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::requiring_native_hit_test(
+        scrolling_scene(nodes),
+        Box::new(GateNative {
+            windows: None,
+            bounds: [(4, owner), (5, full), (9, word_before_scroll)].into(),
+            text_bounds: [((4, 5, 9), word_before_scroll)].into(),
+            hit: Ok(Some(9)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pressed_at: pressed_at.clone(),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: size(px(100.0), px(100.0)),
+        }),
+    );
+
+    agent.press_node(11).unwrap();
+
+    assert_eq!(
+        *pressed_at.lock().unwrap(),
+        vec![word_after_scroll.center()]
+    );
+    assert_ne!(word_after_scroll.center(), word_before_scroll.center());
+    assert_ne!(word_after_scroll.center(), owner.center());
+    GATE_HIT_AFTER_SCROLL.with(|hit| hit.set(None));
+    GATE_SCROLL_MOVES.with(|moves| moves.set(false));
+    GATE_SCROLLED.with(|scrolled| scrolled.set(false));
+}
+
+#[test]
+fn a_drag_start_covered_by_a_dialog_leaves_the_page_unscrolled() {
+    GATE_SCROLLED.with(|scrolled| scrolled.set(false));
+    GATE_HIT_AFTER_SCROLL.with(|hit| hit.set(None));
+    let (mut nodes, target) = covered_low_nodes();
+    nodes.iter_mut().find(|node| node.id == 9).unwrap().modal = true;
+    let full = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(100.0)));
+    let presses = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let agent = Agent::requiring_native_hit_test(
+        scrolling_scene(nodes),
+        Box::new(GateNative {
+            windows: None,
+            // The dialog-sized cover includes both the target's point and
+            // the scroller's middle, where the clearing drag would start.
+            bounds: [(2, target), (5, full), (9, full)].into(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(9)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: presses.clone(),
+            pressed_at: Arc::new(Mutex::new(Vec::new())),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: size(px(100.0), px(100.0)),
+        }),
+    );
+
+    let error = agent.press_node(2).unwrap_err();
+
+    assert!(error.starts_with("occluded_by: 9"), "{error}");
+    assert!(!error.contains("scroll(s) towards the middle"), "{error}");
+    assert!(!GATE_SCROLLED.with(std::cell::Cell::get));
+    assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn an_input_press_to_focus_scrolls_clear_before_the_press_and_focus_wait() {
+    let _strict_env_lock = STRICT_ENV_LOCK.lock().unwrap();
+    GATE_SCROLLED.with(|scrolled| scrolled.set(false));
+    GATE_SCROLL_MOVES.with(|moves| moves.set(true));
+    GATE_HIT_AFTER_SCROLL.with(|hit| hit.set(Some(2)));
+    GATE_FOCUSED.with(|focused| focused.set(None));
+    let (mut nodes, target) = covered_low_nodes();
+    nodes.iter_mut().find(|node| node.id == 2).unwrap().input = true;
+    let full = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(100.0)));
+    let typed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let pressed_at = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::requiring_native_hit_test(
+        scrolling_scene(nodes),
+        Box::new(GateNative {
+            windows: None,
+            bounds: [(2, target), (5, full), (9, target)].into(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(9)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pressed_at: pressed_at.clone(),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: typed.clone(),
+            viewport: size(px(100.0), px(100.0)),
+        }),
+    );
+
+    agent.type_node(2, "x").unwrap();
+
+    let mut target_after_scroll = target;
+    target_after_scroll.origin.y = Points(target_after_scroll.origin.y.0 - 20.0);
+    assert_eq!(
+        *pressed_at.lock().unwrap(),
+        vec![target_after_scroll.center()]
+    );
+    assert_eq!(typed.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(GATE_FOCUSED.with(std::cell::Cell::get), Some(2));
+    GATE_HIT_AFTER_SCROLL.with(|hit| hit.set(None));
+    GATE_FOCUSED.with(|focused| focused.set(None));
+    GATE_SCROLL_MOVES.with(|moves| moves.set(false));
     GATE_SCROLLED.with(|scrolled| scrolled.set(false));
 }
 
@@ -4017,6 +4182,73 @@ fn a_press_occluded_by_a_cover_that_does_not_move_still_refuses() {
     assert!(error.starts_with("occluded_by: 9"), "{error}");
     assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 0);
     GATE_SCROLLED.with(|scrolled| scrolled.set(false));
+}
+
+#[test]
+fn a_refusal_after_scrolling_reports_the_scrolls_towards_the_middle() {
+    GATE_SCROLLED.with(|scrolled| scrolled.set(false));
+    GATE_HIT_AFTER_SCROLL.with(|hit| hit.set(None));
+    let (nodes, target) = covered_low_nodes();
+    let full = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(100.0)));
+    let agent = Agent::requiring_native_hit_test(
+        scrolling_scene(nodes),
+        Box::new(GateNative {
+            windows: None,
+            bounds: [(2, target), (5, full), (9, target)].into(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(9)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pressed_at: Arc::new(Mutex::new(Vec::new())),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: size(px(100.0), px(100.0)),
+        }),
+    );
+
+    let error = agent.press_node(2).unwrap_err();
+
+    assert_eq!(error, "occluded_by: 9 after 2 scroll(s) towards the middle");
+    GATE_SCROLLED.with(|scrolled| scrolled.set(false));
+}
+
+#[test]
+fn strict_presses_refuse_an_occluding_cover_without_scrolling() {
+    let _strict_env_lock = STRICT_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var("GPUI_AGENT_PRESS_STRICT", "1");
+    }
+    GATE_SCROLLED.with(|scrolled| scrolled.set(false));
+    GATE_HIT_AFTER_SCROLL.with(|hit| hit.set(Some(2)));
+    let (nodes, target) = covered_low_nodes();
+    let full = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(100.0)));
+    let presses = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let agent = Agent::requiring_native_hit_test(
+        scrolling_scene(nodes),
+        Box::new(GateNative {
+            windows: None,
+            bounds: [(2, target), (5, full), (9, target)].into(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(9)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: presses.clone(),
+            pressed_at: Arc::new(Mutex::new(Vec::new())),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: size(px(100.0), px(100.0)),
+        }),
+    );
+
+    let error = agent.press_node(2).unwrap_err();
+    unsafe {
+        std::env::remove_var("GPUI_AGENT_PRESS_STRICT");
+    }
+
+    assert!(error.starts_with("occluded_by: 9"), "{error}");
+    assert!(!error.contains("scroll(s) towards the middle"), "{error}");
+    assert!(!GATE_SCROLLED.with(std::cell::Cell::get));
+    assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 0);
+    GATE_HIT_AFTER_SCROLL.with(|hit| hit.set(None));
 }
 
 #[test]

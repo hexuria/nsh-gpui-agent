@@ -817,6 +817,28 @@ struct KeyboardTrack {
     settled: Option<Bounds<Points>>,
 }
 
+/// Whether strict presses refuse every occlusion exactly as before the
+/// scroll-clear recovery. gpui-agent's `as_written` is client-side
+/// negotiation and is not visible to the host per request, so the opt-out
+/// is this environment variable (runtime, or compile-time where Android
+/// bakes the environment).
+fn press_strict() -> bool {
+    fn on(value: Option<&str>) -> bool {
+        value.is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    }
+    on(std::env::var("GPUI_AGENT_PRESS_STRICT").ok().as_deref())
+        || on(option_env!("GPUI_AGENT_PRESS_STRICT"))
+}
+
+/// `error`, naming how many scrolls towards the middle a refusal followed.
+fn after_scrolls(error: String, scrolled: usize) -> String {
+    if scrolled == 0 {
+        error
+    } else {
+        format!("{error} after {scrolled} scroll(s) towards the middle")
+    }
+}
+
 impl KeyboardTrack {
     /// Takes the frame read at `now`; `None` when it has settled (then
     /// [`KeyboardTrack::settled`] is it), else when it will have.
@@ -1070,6 +1092,12 @@ impl Agent {
 
     /// Clicks semantic node `id`, after native actionability is established.
     pub fn press_node(&self, id: NodeId) -> Result<(), String> {
+        self.press_node_reporting_scrolls(id).map(|_| ())
+    }
+
+    /// [`Agent::press_node`], answering how many scroll gestures clearing an
+    /// occluding floating cover the press took.
+    pub fn press_node_reporting_scrolls(&self, id: NodeId) -> Result<usize, String> {
         self.settled_and_keyboard()?;
         let selector = format!("node {id}");
         let nodes = self.scene.semantic_tree()?;
@@ -1086,7 +1114,7 @@ impl Agent {
         let geometry = self
             .target_geometry(target)
             .ok_or_else(|| format!("`{selector}` is offscreen (no native bounds)"))?;
-        let at = self.actionable_point_with_press_owner_scrolling_clear(
+        let (at, scrolled) = self.actionable_point_with_press_owner_scrolling_clear_count(
             id,
             geometry.owner,
             selected,
@@ -1094,7 +1122,8 @@ impl Agent {
             Some(owner),
         )?;
         self.native.press(at);
-        self.settled()
+        self.settled()?;
+        Ok(scrolled)
     }
 
     /// Clicks semantic node `id` at `within`, a point in the node's own
@@ -2384,7 +2413,29 @@ impl Agent {
         selector: &str,
         press_owner: Option<NodeId>,
     ) -> Result<Point<Points>, String> {
+        self.actionable_point_with_press_owner_scrolling_clear_count(
+            id,
+            native_owner,
+            fallback,
+            selector,
+            press_owner,
+        )
+        .map(|(point, _)| point)
+    }
+
+    /// [`Agent::actionable_point_with_press_owner_scrolling_clear`], also
+    /// answering how many gestures towards the window's middle it took.
+    fn actionable_point_with_press_owner_scrolling_clear_count(
+        &self,
+        id: NodeId,
+        native_owner: NodeId,
+        fallback: Point<Points>,
+        selector: &str,
+        press_owner: Option<NodeId>,
+    ) -> Result<(Point<Points>, usize), String> {
         let mut at = fallback;
+        let mut scrolled = 0;
+        let strict = press_strict();
         for attempt in 0..3 {
             match self.actionable_point_with_press_owner(
                 id,
@@ -2395,26 +2446,53 @@ impl Agent {
                 false,
                 false,
             ) {
-                Ok(point) => return Ok(point),
+                Ok(point) => return Ok((point, scrolled)),
                 Err(error) => {
                     // The software keyboard's cover is not scrolled away
                     // here: its own message says how, and a press meant
                     // for the keyboard's target is not a tap past it.
                     if error.starts_with("occluded_by: software keyboard")
+                        || strict
                         || !(error.starts_with("occluded_by:") && attempt < 2)
-                        || !self.scroll_towards_middle(native_owner)?
                     {
-                        return Err(error);
+                        return Err(after_scrolls(error, scrolled));
                     }
-                    at = self
-                        .native
-                        .bounds(native_owner)
-                        .map(|bounds| bounds.center())
-                        .unwrap_or(at);
+                    let moved = match self.scroll_towards_middle(native_owner) {
+                        Ok(moved) => moved,
+                        Err(scroll_error) => return Err(after_scrolls(scroll_error, scrolled)),
+                    };
+                    if !moved {
+                        return Err(after_scrolls(error, scrolled));
+                    }
+                    scrolled += 1;
+                    at = match self.target_point_after_scroll(id, selector) {
+                        Ok(point) => point,
+                        Err(point_error) => return Err(after_scrolls(point_error, scrolled)),
+                    };
                 }
             }
         }
         unreachable!("the loop returns or errors on every path")
+    }
+
+    /// The target's own current point after a scroll, never merely its
+    /// native host view's centre: a text span keeps its word and a canvas
+    /// item its cell. No recomputation, no retry point.
+    fn target_point_after_scroll(
+        &self,
+        id: NodeId,
+        selector: &str,
+    ) -> Result<Point<Points>, String> {
+        let nodes = self.scene.semantic_tree()?;
+        let node = nodes
+            .iter()
+            .find(|node| node.id == id)
+            .ok_or_else(|| format!("`{selector}` is offscreen (node unavailable)"))?;
+        self.target_geometry(node)
+            .map(|geometry| geometry.bounds.center())
+            .ok_or_else(|| {
+                format!("`{selector}` is offscreen (the press point cannot be recomputed)")
+            })
     }
 
     /// [`Agent::actionable_point`] for a point the caller chose: outside
@@ -2778,6 +2856,14 @@ impl Agent {
                     )
                 })
                 .unwrap_or(fallback);
+            if self.require_hit_test {
+                let nodes = self.scene.semantic_tree()?;
+                let parents = mounted_parents(&nodes);
+                match self.native.hit_at(middle)? {
+                    Some(hit) if is_descendant_or_same(hit, scroller, &parents) => {}
+                    _ => return Ok(false),
+                }
+            }
             self.native.scroll(middle, point(Points(0.0), Points(step)));
             self.stopped(id)?;
             return Ok(true);

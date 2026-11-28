@@ -154,8 +154,14 @@ impl NshAgentHost {
         match op {
             Op::Click { target, .. } => self
                 .agent
-                .press_node(self.node_id(target)?)
-                .map(|()| DispatchResult::empty()),
+                .press_node_reporting_scrolls(self.node_id(target)?)
+                .map(|scrolled| {
+                    if scrolled == 0 {
+                        DispatchResult::empty()
+                    } else {
+                        DispatchResult::json(serde_json::json!({"scrolled": scrolled}))
+                    }
+                }),
             Op::Type { target, text, .. } => self
                 .agent
                 .type_node(self.node_id(target)?, text)
@@ -576,7 +582,12 @@ impl NshAgentHost {
         match name {
             "press" => {
                 if args.get("target").is_some() {
-                    self.agent.press_node(target("target")?)?;
+                    let scrolled = self.agent.press_node_reporting_scrolls(target("target")?)?;
+                    if scrolled != 0 {
+                        return Ok(DispatchResult::json(
+                            serde_json::json!({"scrolled": scrolled}),
+                        ));
+                    }
                 } else {
                     self.agent.press_at(
                         optional_point(args)?.ok_or("invoke `press` needs x and y or target")?,
@@ -1452,8 +1463,12 @@ mod tests {
             Err("unused test scene method".into())
         }
 
-        fn scroll_ancestors(&self, _: NodeId) -> Result<Vec<(NodeId, bool)>, String> {
-            Ok(Vec::new())
+        fn scroll_ancestors(&self, id: NodeId) -> Result<Vec<(NodeId, bool)>, String> {
+            if id == 3 {
+                Ok(vec![(42, false)])
+            } else {
+                Ok(Vec::new())
+            }
         }
 
         fn long_press_delay(&self, _: NodeId) -> Result<Option<f32>, String> {
@@ -1588,6 +1603,10 @@ mod tests {
         selection: Option<(u32, u32)>,
         /// How many times the selections were read.
         selection_reads: Arc<std::sync::atomic::AtomicUsize>,
+        /// The hit after a scroll in the scroll-clear tests.
+        hit_after_scroll: Option<NodeId>,
+        /// Scrolls the test native recorded.
+        scrolls: Arc<std::sync::Mutex<Vec<(Point<Points>, Point<Points>)>>>,
     }
 
     impl SnapshotNative {
@@ -1612,6 +1631,8 @@ mod tests {
                 keys: Arc::default(),
                 selection: None,
                 selection_reads: Arc::default(),
+                hit_after_scroll: None,
+                scrolls: Arc::default(),
             }
         }
     }
@@ -1641,7 +1662,16 @@ mod tests {
             }
         }
 
-        fn hit_at(&self, _: Point<Points>) -> Result<Option<NodeId>, String> {
+        fn hit_at(&self, at: Point<Points>) -> Result<Option<NodeId>, String> {
+            if !self.scrolls.lock().unwrap().is_empty() && self.hit_after_scroll.is_some() {
+                return Ok(self.hit_after_scroll);
+            }
+            if self.hit == Some(9)
+                && let Some(cover) = self.bounds(9)
+                && !cover.contains(&at)
+            {
+                return Ok(Some(42));
+            }
             Ok(self.hit)
         }
 
@@ -1695,6 +1725,8 @@ mod tests {
                 1 => (0.0, 0.0, 100.0, 100.0),
                 2 => (80.0, 80.0, 30.0, 30.0),
                 3 => (5.0, 5.0, 10.0, 10.0),
+                9 => (5.0, 5.0, 10.0, 10.0),
+                42 => (0.0, 0.0, 50.0, 50.0),
                 5 => (0.0, 45.0, 50.0, 5.0),
                 10 => (0.0, 45.0, 50.0, 0.0),
                 11 => (0.0, 0.0, 50.0, 50.0),
@@ -1722,7 +1754,9 @@ mod tests {
         }
 
         fn long_press(&self, _: Point<Points>, _: std::time::Duration) {}
-        fn scroll(&self, _: Point<Points>, _: Point<Points>) {}
+        fn scroll(&self, at: Point<Points>, delta: Point<Points>) {
+            self.scrolls.lock().unwrap().push((at, delta));
+        }
 
         fn drag(&self, from: Point<Points>, to: Point<Points>) {
             self.drags.lock().unwrap().push((from, to));
@@ -2578,6 +2612,45 @@ mod tests {
             *presses.lock().unwrap(),
             vec![Point::new(Points(10.0), Points(10.0))]
         );
+    }
+
+    #[test]
+    fn a_scroll_cleared_press_reports_the_scroll_count() {
+        let mut nodes = sample_nodes();
+        let visible = nodes.iter_mut().find(|node| node.id == 3).unwrap();
+        visible.enabled = true;
+        visible.pressable = true;
+        visible.parent = Some(42);
+        let mut scroller = SemanticNode::default();
+        scroller.id = 42;
+        scroller.parent = Some(1);
+        scroller.test_id = Some("scroller".into());
+        scroller.scroll = true;
+        let mut cover = SemanticNode::default();
+        cover.id = 9;
+        cover.parent = Some(1);
+        cover.test_id = Some("cover".into());
+        nodes.push(scroller);
+        nodes.push(cover);
+        let mut native = SnapshotNative::new(true, None, false);
+        native.hit = Some(9);
+        native.hit_after_scroll = Some(3);
+        let scrolls = native.scrolls.clone();
+        let mut host =
+            snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);
+
+        let result = host
+            .dispatch(&Op::Press {
+                target: Some("visible".into()),
+                x: None,
+                y: None,
+                within: None,
+                expect_fingerprint: None,
+            })
+            .unwrap();
+
+        assert_eq!(scrolls.lock().unwrap().len(), 1);
+        assert_eq!(result.value, Some(serde_json::json!({"scrolled": 1})));
     }
 
     /// A host over the sample tree whose `visible` (node 3, 10 by 10 at
