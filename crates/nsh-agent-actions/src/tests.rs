@@ -192,6 +192,9 @@ impl Native for GateNative {
         self.pressed_at.lock().unwrap().push(at);
         if let Some(id) = GATE_FOCUS_ON_PRESS.with(std::cell::Cell::get) {
             GATE_FOCUSED.with(|focused| focused.set(Some(id)));
+        } else if let Ok(Some(hit)) = self.hit_node(at) {
+            // As a platform's press does: what it hits takes the focus.
+            GATE_FOCUSED.with(|focused| focused.set(Some(hit)));
         }
     }
     fn long_press(&self, at: Point<Points>, hold: Duration) {
@@ -274,12 +277,10 @@ thread_local! {
     static GATE_FOCUS_ON_PRESS: std::cell::Cell<Option<NodeId>> = const { std::cell::Cell::new(None) };
 }
 
-impl StrictNative for GateNative {
-    fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
-        Ok(GATE_KEYBOARD.with(std::cell::Cell::get))
-    }
-    fn hit_at(&self, at: Point<Points>) -> Result<Option<NodeId>, String> {
-        self.hits.lock().unwrap().push(at);
+impl GateNative {
+    /// The hit `hit_at` reports, without recording it (a press reads where
+    /// it fell for the focus it gives; the press itself is the action).
+    fn hit_node(&self, at: Point<Points>) -> Result<Option<NodeId>, String> {
         if let Some(windows) = &self.windows {
             let selected = *windows.selected.lock().unwrap();
             return Ok(self
@@ -298,6 +299,19 @@ impl StrictNative for GateNative {
         }
         self.hit.clone()
     }
+}
+
+impl StrictNative for GateNative {
+    fn focus_known(&self) -> bool {
+        true
+    }
+    fn keyboard_frame(&self) -> Result<Option<Bounds<Points>>, String> {
+        Ok(GATE_KEYBOARD.with(std::cell::Cell::get))
+    }
+    fn hit_at(&self, at: Point<Points>) -> Result<Option<NodeId>, String> {
+        self.hits.lock().unwrap().push(at);
+        self.hit_node(at)
+    }
     fn focus_node(&self, _: NodeId) -> Result<(), String> {
         if self.windows.is_none() {
             return Err(NATIVE_FOCUS_UNSUPPORTED.into());
@@ -315,12 +329,27 @@ struct SystemActionRecords {
     typed_text: Mutex<Vec<String>>,
     rotations: Mutex<Vec<bool>>,
     keyboards: Mutex<Vec<bool>>,
+    /// What [`Native::focused`] answered the moment each key or typed
+    /// text went out: proof the input had the focus before the keys.
+    focus_at_keys: Mutex<Vec<Option<NodeId>>>,
+    key_texts: Mutex<Vec<String>>,
 }
 
 struct SystemActionNative {
     bounds: std::collections::HashMap<NodeId, Bounds<Points>>,
     viewport: Size<Points>,
-    focused: Option<NodeId>,
+    focused: Mutex<Option<NodeId>>,
+    /// The focus a press asked for, delivered when the settle loop next
+    /// polls the platform (`animating`): a posted press's effect arrives
+    /// after the press returns, as on macOS.
+    pending_focus: Mutex<Option<NodeId>>,
+    press_focuses: bool,
+    /// The press's focus arrives only with the event loop (at the next
+    /// `animating` poll), not inside `press`.
+    focus_after_settle: bool,
+    /// Whether this native reports the focus at all: `false` models a
+    /// platform whose `focused` is the trait's default `None`.
+    reports_focus: bool,
     records: Arc<SystemActionRecords>,
     rotate_error: Option<&'static str>,
     keyboard_error: Option<&'static str>,
@@ -336,6 +365,15 @@ impl Native for SystemActionNative {
     fn press(&self, at: Point<Points>) {
         self.records.calls.lock().unwrap().push("press");
         self.records.presses.lock().unwrap().push(at);
+        if self.press_focuses
+            && let Some((id, _)) = self.bounds.iter().find(|(_, bounds)| bounds.contains(&at))
+        {
+            if self.focus_after_settle {
+                *self.pending_focus.lock().unwrap() = Some(*id);
+            } else {
+                *self.focused.lock().unwrap() = Some(*id);
+            }
+        }
     }
     fn long_press(&self, _: Point<Points>, _: Duration) {}
     fn scroll(&self, _: Point<Points>, _: Point<Points>) {}
@@ -343,17 +381,45 @@ impl Native for SystemActionNative {
     fn type_text(&self, text: &str) {
         self.records.calls.lock().unwrap().push("type");
         self.records
+            .focus_at_keys
+            .lock()
+            .unwrap()
+            .push(*self.focused.lock().unwrap());
+        self.records
             .typed_text
             .lock()
             .unwrap()
             .push(text.to_string());
     }
-    fn key(&self, _: Key) {}
+    fn key(&self, _: Key) {
+        self.records
+            .focus_at_keys
+            .lock()
+            .unwrap()
+            .push(*self.focused.lock().unwrap());
+    }
+    fn press_keys(&self, keys: &str) -> Result<(), String> {
+        self.records
+            .focus_at_keys
+            .lock()
+            .unwrap()
+            .push(*self.focused.lock().unwrap());
+        self.records
+            .key_texts
+            .lock()
+            .unwrap()
+            .push(keys.to_string());
+        Ok(())
+    }
     fn input_text(&self, _: NodeId) -> Option<String> {
         None
     }
     fn focused(&self) -> Option<NodeId> {
-        self.focused
+        if self.reports_focus {
+            *self.focused.lock().unwrap()
+        } else {
+            None
+        }
     }
     fn paste(&self, content: &nsh_core::PasteEvent) -> Result<(), String> {
         self.records.calls.lock().unwrap().push("paste");
@@ -371,6 +437,11 @@ impl Native for SystemActionNative {
         Ok(())
     }
     fn animating(&self) -> bool {
+        // The event loop's turn: a focus the press posted is delivered
+        // once the loop runs, never inside the press itself.
+        if let Some(id) = self.pending_focus.lock().unwrap().take() {
+            *self.focused.lock().unwrap() = Some(id);
+        }
         false
     }
     fn screenshot(&self) -> Result<Vec<u8>, String> {
@@ -386,6 +457,9 @@ impl Native for SystemActionNative {
 }
 
 impl StrictNative for SystemActionNative {
+    fn focus_known(&self) -> bool {
+        self.reports_focus
+    }
     fn rotate(&self, landscape: bool) -> Result<(), String> {
         self.records.calls.lock().unwrap().push("rotate");
         self.records.rotations.lock().unwrap().push(landscape);
@@ -460,6 +534,19 @@ fn system_action_agent(
     rotate_error: Option<&'static str>,
     keyboard_error: Option<&'static str>,
 ) -> (Agent, Arc<SystemActionRecords>) {
+    system_action_agent_with(input, focused, rotate_error, keyboard_error, true)
+}
+
+/// [`system_action_agent`]; `press_focuses` says whether a press inside the
+/// input gives it the focus, as a platform's does when its events are
+/// delivered in order.
+fn system_action_agent_with(
+    input: bool,
+    focused: Option<NodeId>,
+    rotate_error: Option<&'static str>,
+    keyboard_error: Option<&'static str>,
+    press_focuses: bool,
+) -> (Agent, Arc<SystemActionRecords>) {
     use nsh_core::{EventMask, InputConfig, MountItem, ViewKind, ViewProps};
 
     let model = Arc::new(Model::default());
@@ -503,12 +590,167 @@ fn system_action_agent(
     let native = SystemActionNative {
         bounds: [(2, frame)].into(),
         viewport: size(px(100.0), px(100.0)),
-        focused,
+        focused: Mutex::new(focused),
+        pending_focus: Mutex::new(None),
+        press_focuses,
+        focus_after_settle: false,
+        reports_focus: true,
         records: records.clone(),
         rotate_error,
         keyboard_error,
     };
     (Agent::new(model, Box::new(native)), records)
+}
+
+/// [`system_action_agent`], with the focus delivery and reporting of the
+/// platform tuned: `focus_after_settle` delivers a press's focus only at
+/// the event loop's next turn (a posted press, as macOS delivers it), and
+/// `reports_focus` false models a platform whose `focused` never answers
+/// (the trait's default `None`).
+fn system_action_agent_focus(
+    focus_after_settle: bool,
+    reports_focus: bool,
+) -> (Agent, Arc<SystemActionRecords>) {
+    use nsh_core::{EventMask, InputConfig, MountItem, ViewKind, ViewProps};
+
+    let model = Arc::new(Model::default());
+    let mut events = EventMask::default();
+    events.set(EventKind::Press, true);
+    let props = ViewProps {
+        test_id: Some("target".into()),
+        ..ViewProps::default()
+    };
+    let frame = Bounds::new(point(px(20.0), px(0.0)), size(px(60.0), px(100.0)));
+    let items = vec![
+        MountItem::Create {
+            id: 2,
+            kind: ViewKind::Input,
+        },
+        MountItem::Frame { id: 2, frame },
+        MountItem::Insert {
+            parent: 1,
+            child: 2,
+            before: None,
+        },
+        MountItem::Events { id: 2, events },
+        MountItem::ViewProps {
+            id: 2,
+            props: Box::new(props),
+        },
+        MountItem::Input {
+            id: 2,
+            config: Box::new(InputConfig::default()),
+        },
+    ];
+    model.apply(&MountBatch { items });
+
+    let records = Arc::new(SystemActionRecords::default());
+    let native = SystemActionNative {
+        bounds: [(2, frame)].into(),
+        viewport: size(px(100.0), px(100.0)),
+        focused: Mutex::new(None),
+        pending_focus: Mutex::new(None),
+        press_focuses: true,
+        focus_after_settle,
+        reports_focus,
+        records: records.clone(),
+        rotate_error: None,
+        keyboard_error: None,
+    };
+    (Agent::new(model, Box::new(native)), records)
+}
+
+#[test]
+fn type_node_proceeds_after_settle_when_the_platform_never_reports_focus() {
+    // nsh-gpui-agent#26 T1: a native whose `focused` never answers (the
+    // trait's default `None`) cannot prove the focus; type must not refuse
+    // it: the keys proceed once the press has settled.
+    let (agent, records) = system_action_agent_focus(false, false);
+
+    agent.type_node(2, "typed text").unwrap();
+
+    assert_eq!(
+        *records.typed_text.lock().unwrap(),
+        vec!["typed text".to_string()]
+    );
+}
+
+#[test]
+fn type_node_waits_for_the_focus_the_press_delivers() {
+    // macOS posts the press and sends keys at once: the focus the press
+    // means to make arrives only with the event loop. The keys must wait
+    // for it.
+    let (agent, records) = system_action_agent_focus(true, true);
+
+    agent.type_node(2, "typed text").unwrap();
+
+    assert_eq!(
+        *records.typed_text.lock().unwrap(),
+        vec!["typed text".to_string()]
+    );
+    assert!(
+        records
+            .focus_at_keys
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|focused| *focused == Some(2)),
+        "every key went out with the input focused: {:?}",
+        records.focus_at_keys.lock().unwrap()
+    );
+}
+
+#[test]
+fn set_value_node_waits_for_the_focus_the_press_delivers() {
+    let (agent, records) = system_action_agent_focus(true, true);
+
+    agent.set_value_node(2, "replacement").unwrap();
+
+    assert!(
+        !records.focus_at_keys.lock().unwrap().is_empty()
+            && records
+                .focus_at_keys
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|focused| *focused == Some(2)),
+        "select-all, the clear and the text went out with the input focused: {:?}",
+        records.focus_at_keys.lock().unwrap()
+    );
+}
+
+#[test]
+fn key_node_waits_for_the_focus_the_press_delivers() {
+    let (agent, records) = system_action_agent_focus(true, true);
+
+    agent.key_node(2, "enter").unwrap();
+
+    assert!(
+        !records.focus_at_keys.lock().unwrap().is_empty()
+            && records
+                .focus_at_keys
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|focused| *focused == Some(2)),
+        "the chord went out with the input focused: {:?}",
+        records.focus_at_keys.lock().unwrap()
+    );
+}
+
+#[test]
+fn the_focus_error_names_the_node_that_has_the_focus() {
+    // T1(c): a press that fails to focus the input while another node
+    // holds the focus names that node.
+    let (agent, records) = system_action_agent_with(true, Some(7), None, None, false);
+    let _ = records;
+
+    let error = agent.type_node(2, "typed text").unwrap_err();
+
+    assert!(
+        error.contains('7'),
+        "the error names the node that has the focus: {error}"
+    );
 }
 
 #[test]
@@ -571,6 +813,20 @@ fn type_node_focuses_an_unfocused_input_before_typing() {
         *records.typed_text.lock().unwrap(),
         vec!["typed text".to_string()]
     );
+}
+
+#[test]
+fn type_node_does_not_type_when_the_press_did_not_focus_the_input() {
+    // nsh-gpui-agent#14: a platform can deliver keys before the press that
+    // was meant to focus the input (macOS posts mouse events to the queue
+    // but sends keys synchronously), so the keys would land in whatever
+    // still holds the focus. `type` must prove the input is focused after
+    // its press and before the keys, or say it cannot.
+    let (agent, records) = system_action_agent_with(true, None, None, None, false);
+
+    assert!(agent.type_node(2, "typed text").is_err());
+
+    assert!(records.typed_text.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -3761,4 +4017,321 @@ fn a_press_occluded_by_a_cover_that_does_not_move_still_refuses() {
     assert!(error.starts_with("occluded_by: 9"), "{error}");
     assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 0);
     GATE_SCROLLED.with(|scrolled| scrolled.set(false));
+}
+
+#[test]
+fn copy_chords_are_known_on_every_platform() {
+    for keys in [
+        "mod+c",
+        "Cmd+C",
+        "⌘+x",
+        "ctrl+x",
+        "ctl+c",
+        "ctrl+insert",
+        "shift+delete",
+        "shift+del",
+        "copy",
+        "XF86Cut",
+        "KEYCODE_COPY",
+    ] {
+        assert!(is_copy_chord(keys), "{keys}");
+    }
+    for keys in [
+        "c", "x", "shift+c", "alt+x", "mod+v", "insert", "delete", "Tab", "",
+    ] {
+        assert!(!is_copy_chord(keys), "{keys}");
+    }
+}
+
+#[test]
+fn press_owner_stops_at_a_modal_root() {
+    // A pressable host (2) whose modal (3) holds a plain label (4) and a
+    // pressable row (5) with a plain child (7).
+    let mut modal = semantic_node(3, Some(2), false, SemanticTarget::View);
+    modal.modal = true;
+    let nodes = vec![
+        semantic_node(1, None, false, SemanticTarget::View),
+        semantic_node(2, Some(1), true, SemanticTarget::View),
+        modal,
+        semantic_node(4, Some(3), false, SemanticTarget::View),
+        semantic_node(5, Some(3), true, SemanticTarget::View),
+        semantic_node(7, Some(5), false, SemanticTarget::View),
+    ];
+    let node = |id: NodeId| nodes.iter().find(|node| node.id == id).unwrap();
+    // The label is in the modal's layer: the host outside it takes nothing.
+    assert_eq!(press_owner(&nodes, node(4)), None);
+    assert_eq!(press_owner(&nodes, node(3)), None);
+    // A pressable view inside the modal still owns its children's presses.
+    assert_eq!(press_owner(&nodes, node(7)), Some(5));
+    assert_eq!(press_owner(&nodes, node(5)), Some(5));
+}
+
+/// An agent over `nodes` whose native frames are `bounds` in a 100 by 100
+/// window, and whose hit test answers `hit`: it and its press count.
+fn modal_agent(
+    nodes: Vec<SemanticNode>,
+    bounds: &[(NodeId, Bounds<Points>)],
+    hit: NodeId,
+) -> (Agent, Arc<std::sync::atomic::AtomicUsize>) {
+    let presses = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let agent = Agent::requiring_native_hit_test(
+        target_scene(nodes),
+        Box::new(GateNative {
+            windows: None,
+            bounds: bounds.iter().copied().collect(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(hit)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: presses.clone(),
+            pressed_at: Arc::new(Mutex::new(Vec::new())),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: Size::new(px(100.0), px(100.0)),
+        }),
+    );
+    (agent, presses)
+}
+
+fn rect(x: f32, y: f32, width: f32, height: f32) -> Bounds<Points> {
+    Bounds::new(
+        point(px(x), px(y)),
+        Size::new(Points(width), Points(height)),
+    )
+}
+
+#[test]
+fn a_modal_partly_off_screen_presses_its_part_on_screen_only() {
+    // The modal (3) runs from y 50 to 150 in a 100-point window: row 4 is
+    // on screen, row 6 below the window's edge.
+    let mut modal = semantic_node(3, Some(2), false, SemanticTarget::View);
+    modal.modal = true;
+    let nodes = vec![
+        semantic_node(1, None, false, SemanticTarget::View),
+        semantic_node(2, Some(1), false, SemanticTarget::View),
+        modal,
+        semantic_node(4, Some(3), true, SemanticTarget::View),
+        semantic_node(6, Some(3), true, SemanticTarget::View),
+    ];
+    let bounds = [
+        (1, rect(0.0, 0.0, 100.0, 100.0)),
+        (2, rect(0.0, 0.0, 100.0, 100.0)),
+        (3, rect(0.0, 50.0, 100.0, 100.0)),
+        (4, rect(10.0, 60.0, 20.0, 20.0)),
+        (6, rect(10.0, 120.0, 20.0, 10.0)),
+    ];
+    let (agent, presses) = modal_agent(nodes.clone(), &bounds, 4);
+    agent.press_node(4).unwrap();
+    assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+    let (agent, presses) = modal_agent(nodes, &bounds, 6);
+    let error = agent.press_node(6).unwrap_err();
+    assert!(error.contains("offscreen"), "{error}");
+    assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn a_sheet_under_a_dialog_is_still_occluded() {
+    // A sheet (2) and a dialog (5) over it, both modal roots: a press on
+    // the sheet's row (4) where the dialog's button (6) is on top is
+    // refused, though each modal ignores its logical host's clip.
+    let mut sheet = semantic_node(2, Some(1), false, SemanticTarget::View);
+    sheet.modal = true;
+    let mut dialog = semantic_node(5, Some(1), false, SemanticTarget::View);
+    dialog.modal = true;
+    let nodes = vec![
+        semantic_node(1, None, false, SemanticTarget::View),
+        sheet,
+        semantic_node(4, Some(2), true, SemanticTarget::View),
+        dialog,
+        semantic_node(6, Some(5), true, SemanticTarget::View),
+    ];
+    let bounds = [
+        (1, rect(0.0, 0.0, 100.0, 100.0)),
+        (2, rect(0.0, 50.0, 100.0, 50.0)),
+        (4, rect(10.0, 60.0, 80.0, 20.0)),
+        (5, rect(10.0, 30.0, 80.0, 60.0)),
+        (6, rect(20.0, 55.0, 60.0, 30.0)),
+    ];
+    let (agent, presses) = modal_agent(nodes, &bounds, 6);
+    let error = agent.press_node(4).unwrap_err();
+    assert!(error.contains("occluded_by: 6"), "{error}");
+    assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn a_hold_within_a_node_in_a_modal_ignores_its_hosts_clip() {
+    use nsh_core::{EventMask, MountItem, ViewKind, ViewProps, ViewStyle};
+
+    // A host (2) laid out with no height that clips, a modal (3) in it
+    // painted over the window, and a cell row (4) in the modal that takes
+    // a long press: a hold at a point of the row is not offscreen.
+    let model = Arc::new(Model::default());
+    let mut events = EventMask::default();
+    events.set(EventKind::LongPress, true);
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Create {
+                id: 2,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 2,
+                frame: rect(0.0, 90.0, 100.0, 0.0),
+            },
+            MountItem::Insert {
+                parent: 1,
+                child: 2,
+                before: None,
+            },
+            MountItem::ViewStyle {
+                id: 2,
+                style: Box::new(ViewStyle {
+                    overflow_hidden: true,
+                    ..Default::default()
+                }),
+            },
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::Modal,
+            },
+            MountItem::Frame {
+                id: 3,
+                frame: rect(0.0, 0.0, 100.0, 100.0),
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Create {
+                id: 4,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 4,
+                frame: rect(10.0, 40.0, 60.0, 20.0),
+            },
+            MountItem::Insert {
+                parent: 3,
+                child: 4,
+                before: None,
+            },
+            MountItem::Events { id: 4, events },
+            MountItem::ViewProps {
+                id: 4,
+                props: Box::new(ViewProps {
+                    test_id: Some("cells".into()),
+                    ..ViewProps::default()
+                }),
+            },
+        ],
+    });
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(
+        model,
+        Ok(Some(4)),
+        &[
+            (2, rect(0.0, 90.0, 100.0, 0.0)),
+            (3, rect(0.0, 0.0, 100.0, 100.0)),
+            (4, rect(10.0, 40.0, 60.0, 20.0)),
+        ],
+        &[],
+        long_presses.clone(),
+    );
+
+    agent
+        .long_press_node_within(4, point(px(50.0), px(10.0)), None)
+        .unwrap();
+
+    assert_eq!(
+        *long_presses.lock().unwrap(),
+        vec![(point(px(60.0), px(50.0)), Duration::from_millis(600))]
+    );
+}
+
+/// An agent over a pressable node 2 (60 by 40 at `origin`) in a 100 by 100
+/// window, whose hit test answers `hit`: it, and the points pressed.
+fn within_press_agent(
+    origin: Point<Points>,
+    hit: NodeId,
+) -> (Agent, Arc<Mutex<Vec<Point<Points>>>>) {
+    let pressed_at = Arc::new(Mutex::new(Vec::new()));
+    let nodes = vec![
+        semantic_node(1, None, false, SemanticTarget::View),
+        semantic_node(2, Some(1), true, SemanticTarget::View),
+        semantic_node(3, Some(1), true, SemanticTarget::View),
+    ];
+    let bounds = [
+        (
+            1,
+            Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(100.0))),
+        ),
+        (2, Bounds::new(origin, size(px(60.0), px(40.0)))),
+        (3, Bounds::new(origin, size(px(60.0), px(40.0)))),
+    ];
+    let agent = Agent::requiring_native_hit_test(
+        target_scene(nodes),
+        Box::new(GateNative {
+            windows: None,
+            bounds: bounds.into(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(hit)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pressed_at: pressed_at.clone(),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: Size::new(px(100.0), px(100.0)),
+        }),
+    );
+    (agent, pressed_at)
+}
+
+#[test]
+fn a_press_within_a_node_lands_at_that_point_of_it() {
+    let (agent, pressed_at) = within_press_agent(point(px(20.0), px(10.0)), 2);
+    agent
+        .press_node_within(2, point(px(50.0), px(30.0)))
+        .unwrap();
+    assert_eq!(*pressed_at.lock().unwrap(), vec![point(px(70.0), px(40.0))]);
+}
+
+#[test]
+fn a_press_within_a_node_refuses_a_point_outside_it() {
+    let (agent, pressed_at) = within_press_agent(point(px(20.0), px(10.0)), 2);
+    for within in [
+        point(px(60.0), px(10.0)),
+        point(px(10.0), px(40.0)),
+        point(px(-1.0), px(10.0)),
+        point(px(f32::NAN), px(10.0)),
+    ] {
+        let error = agent.press_node_within(2, within).unwrap_err();
+        assert!(error.contains("outside the node"), "{within:?}: {error}");
+    }
+    assert!(pressed_at.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_press_within_a_node_is_hit_tested_where_it_lands() {
+    // A sibling (3) on top where the point lands occludes it.
+    let (agent, pressed_at) = within_press_agent(point(px(20.0), px(10.0)), 3);
+    let error = agent
+        .press_node_within(2, point(px(50.0), px(30.0)))
+        .unwrap_err();
+    assert!(error.contains("occluded_by: 3"), "{error}");
+    assert!(pressed_at.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_press_within_a_node_refuses_a_point_scrolled_off_the_window() {
+    // The node runs from y 80 to 120 in a 100-point window.
+    let (agent, pressed_at) = within_press_agent(point(px(20.0), px(80.0)), 2);
+    let error = agent
+        .press_node_within(2, point(px(10.0), px(30.0)))
+        .unwrap_err();
+    assert!(error.contains("outside its visible area"), "{error}");
+    agent
+        .press_node_within(2, point(px(10.0), px(10.0)))
+        .unwrap();
+    assert_eq!(*pressed_at.lock().unwrap(), vec![point(px(30.0), px(90.0))]);
 }

@@ -24,7 +24,7 @@ use nsh_platform_macos::{
     },
     objc2_foundation::{NSPoint, NSRect, NSSize},
 };
-use nsh_testing::agent::{Agent as TestAgent, Model, Scene};
+use nsh_testing::agent::{Agent as TestAgent, Model, Native as _, Scene};
 
 use super::agent_support::{pump, until, worker};
 
@@ -97,6 +97,24 @@ fn Windows() -> impl IntoElement {
                 .top(px(240.0))
                 .w(px(60.0))
                 .h(px(40.0)),
+        )
+        .child(
+            input()
+                .absolute()
+                .left(px(10.0))
+                .top(px(310.0))
+                .w(px(150.0))
+                .h(px(22.0))
+                .test_id("type-first"),
+        )
+        .child(
+            input()
+                .absolute()
+                .left(px(200.0))
+                .top(px(310.0))
+                .w(px(150.0))
+                .h(px(22.0))
+                .test_id("type-second"),
         )
         .child(
             window()
@@ -381,6 +399,50 @@ fn named_click_changes_only_secondary(agent: TestAgent, model: Arc<Model>, secon
     println!("native_agent: named_click_changes_only_secondary");
 }
 
+/// nsh-gpui-agent#14: a bare `type` into one input right after typing into
+/// another must move the focus first - the keys belong to the target, not
+/// to the input the last type left focused.
+fn type_moves_focus_to_the_target_input(model: Arc<Model>, surface_key: u64, main: &NSWindow) {
+    main.makeKeyAndOrderFront(None);
+    main.makeKeyWindow();
+    until("the type-first input", || {
+        model
+            .semantic_tree()
+            .unwrap()
+            .iter()
+            .any(|node| node.test_id.as_deref() == Some("type-first"))
+    });
+    let first = node(&model, "type-first");
+    let second = node(&model, "type-second");
+    let strict_model = model.clone();
+    let alive = Arc::new(AtomicBool::new(true));
+    let key = surface_key;
+    let _agent = worker(move || {
+        let native = Box::new(MacStrictNative::new(key, alive)) as Box<dyn StrictNative>;
+        let agent = StrictAgent::requiring_native_hit_test(strict_model, native);
+        agent.type_node(first, "abc").unwrap();
+        agent.type_node(second, "def").unwrap();
+        agent
+    });
+    let alive = Arc::new(AtomicBool::new(true));
+    let key = surface_key;
+    let (first_text, second_text) = worker(move || {
+        let native = MacStrictNative::new(key, alive);
+        (native.input_text(first), native.input_text(second))
+    });
+    assert_eq!(
+        second_text.as_deref(),
+        Some("def"),
+        "type-second holds {second_text:?}"
+    );
+    assert_eq!(
+        first_text.as_deref(),
+        Some("abc"),
+        "type-first holds {first_text:?}"
+    );
+    println!("native_agent: type_moves_focus_to_the_target_input");
+}
+
 pub(super) fn run() {
     let mtm = MainThreadMarker::new().expect("native checks need the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -443,6 +505,7 @@ pub(super) fn run() {
     foreign_native_view_has_no_node(&mut native, &main);
     let agent =
         targeted_key_and_group_rejection(model.clone(), &mut native, key, &main, &surface.view());
+    type_moves_focus_to_the_target_input(model.clone(), key, &main);
     named_click_changes_only_secondary(agent, model, &secondary_window(mtm));
     surface.stop();
     main.close();

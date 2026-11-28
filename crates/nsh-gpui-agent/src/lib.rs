@@ -51,6 +51,15 @@ pub const TEXT_MENU_ID: &str = "system-text-menu";
 /// ([`SOFTWARE_KEYBOARD_ID`]) and refuses presses on it.
 pub const SOFTWARE_KEYBOARD_FEATURE: &str = "software_keyboard";
 
+/// The `hello.features` entry of a host that aims a press or long press
+/// inside its target (`within`, gpui-agent 0.5.0).
+pub const PRESS_WITHIN_FEATURE: &str = "press_within";
+
+/// A `within` offset as a point in the target's own frame.
+fn within_point(within: &gpui_agent::protocol::PointOffset) -> Point<Points> {
+    Point::new(Points(within.x as f32), Points(within.y as f32))
+}
+
 /// Native Shell host exposed through GPUI-agent.
 #[non_exhaustive]
 pub struct NshAgentHost {
@@ -126,6 +135,17 @@ impl NshAgentHost {
             _ => None,
         };
         if let Some(word) = pressed.and_then(text_menu_item_word) {
+            if matches!(
+                op,
+                Op::Press {
+                    within: Some(_),
+                    ..
+                }
+            ) {
+                return Err(
+                    "`within` does not aim inside the platform's text menu: press the item".into(),
+                );
+            }
             return self
                 .agent
                 .press_text_menu_item(word)
@@ -152,6 +172,18 @@ impl NshAgentHost {
                 .key_node(self.node_id(target)?, key)
                 .map(|()| DispatchResult::empty()),
             Op::Invoke { name, args } => self.invoke(name, args),
+            Op::Press {
+                target,
+                within: Some(within),
+                ..
+            } => {
+                let Some(target) = target else {
+                    return Err("`within` needs a target".into());
+                };
+                self.agent
+                    .press_node_within(self.node_id(target)?, within_point(within))
+                    .map(|()| DispatchResult::empty())
+            }
             Op::Press { .. }
             | Op::Scroll { .. }
             | Op::Hover { .. }
@@ -164,6 +196,7 @@ impl NshAgentHost {
                         target: target.clone(),
                         x: *x,
                         y: *y,
+                        within: None,
                         expect_fingerprint: None,
                     },
                     other => other.clone(),
@@ -177,12 +210,22 @@ impl NshAgentHost {
                 target,
                 x,
                 y,
+                within,
                 duration_ms,
+                ..
             } => {
                 let hold = duration_ms.map(|ms| std::time::Duration::from_millis(ms.min(10_000)));
                 match (target, x, y) {
-                    (Some(target), _, _) => {
-                        self.agent.long_press_node(self.node_id(target)?, hold)?
+                    (Some(target), _, _) => match within {
+                        Some(within) => self.agent.long_press_node_within(
+                            self.node_id(target)?,
+                            within_point(within),
+                            hold,
+                        )?,
+                        None => self.agent.long_press_node(self.node_id(target)?, hold)?,
+                    },
+                    (None, _, _) if within.is_some() => {
+                        return Err("`within` needs a target".into());
                     }
                     (None, Some(x), Some(y)) => self
                         .agent
@@ -331,7 +374,12 @@ impl AgentHost for NshAgentHost {
     fn dispatch(&mut self, op: &Op) -> Result<DispatchResult, String> {
         self.require_available()?;
         let _ = self.agent.take_native_failure();
-        let result = self.dispatch_available(op);
+        let result =
+            self.dispatch_available(op)
+                .map_err(|error| match self.agent.semantic_nodes() {
+                    Ok(nodes) => name_occluder(error, &nodes),
+                    Err(_) => error,
+                });
         if let Some(failure) = self.agent.take_native_failure() {
             return Err(failure);
         }
@@ -441,6 +489,12 @@ impl NshAgentHost {
                 ]);
             }
         }
+        // Every platform aims inside a target (`within`) and answers state
+        // assertions: gpui-agent's own assert matches `UiNode.states`.
+        names.extend([
+            PRESS_WITHIN_FEATURE,
+            gpui_agent::protocol::ASSERT_STATES_FEATURE,
+        ]);
         names.iter().map(|name| (*name).to_string()).collect()
     }
 
@@ -652,6 +706,30 @@ fn optional_point(args: &serde_json::Value) -> Result<Option<Point<Points>>, Str
         ))),
         _ => Err("invoke coordinates require both x and y".into()),
     }
+}
+
+/// An `occluded_by: <id>` refusal with the occluder named as a snapshot
+/// names it, and by the view a press there goes to: `occluded_by: pill (its
+/// n6)` when node 6 is an icon in the pressable `pill`. Any other error, or
+/// an occluder the tree does not know, is returned as it is.
+fn name_occluder(error: String, nodes: &[SemanticNode]) -> String {
+    let Some(rest) = error.strip_prefix("occluded_by: ") else {
+        return error;
+    };
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let Ok(hit) = rest[..digits].parse::<NodeId>() else {
+        return error;
+    };
+    let ids = stable_ids(nodes);
+    let Some(leaf) = ids.get(&hit) else {
+        return error;
+    };
+    let owner = nsh_agent_actions::occluder_press_owner(nodes, hit);
+    let named = match ids.get(&owner) {
+        Some(owner_id) if owner != hit => format!("{owner_id} (its {leaf})"),
+        _ => leaf.clone(),
+    };
+    format!("occluded_by: {named}{}", &rest[digits..])
 }
 
 fn stable_ids(nodes: &[SemanticNode]) -> HashMap<NodeId, String> {
@@ -1487,6 +1565,25 @@ mod tests {
         menu_presses: Arc<std::sync::Mutex<Vec<String>>>,
         /// Whether the clipboard holds a clip the agent set.
         agent_clip: Option<bool>,
+        /// The clipboard's generation, when the platform has one; a copy
+        /// chord the agent presses moves it when `copies` is set.
+        generation: Option<Arc<std::sync::atomic::AtomicU64>>,
+        copies: bool,
+        /// Whether the clipboard's text is the one asked, as the platform
+        /// compares it.
+        clip_text_is: Option<bool>,
+        /// The view the platform says has the focus: a press inside the
+        /// input moves it there when `press_focuses`, as a platform's does.
+        focused: std::sync::Mutex<Option<NodeId>>,
+        /// Whether a press inside the input gives it the focus; false
+        /// models a platform whose focus stays where it was.
+        press_focuses: bool,
+        /// Whether the platform reports the focus at all; false models one
+        /// whose `focused` never answers, where the focus proof proceeds on
+        /// trust after the settle.
+        reports_focus: bool,
+        /// The keystrokes pressed.
+        keys: Arc<std::sync::Mutex<Vec<String>>>,
         /// Input 3's selection, as the platform holds it.
         selection: Option<(u32, u32)>,
         /// How many times the selections were read.
@@ -1506,6 +1603,13 @@ mod tests {
                 text_menu: None,
                 menu_presses: Arc::default(),
                 agent_clip: None,
+                generation: None,
+                copies: true,
+                clip_text_is: None,
+                focused: std::sync::Mutex::new(None),
+                press_focuses: true,
+                reports_focus: true,
+                keys: Arc::default(),
                 selection: None,
                 selection_reads: Arc::default(),
             }
@@ -1513,6 +1617,14 @@ mod tests {
     }
 
     impl StrictNative for SnapshotNative {
+        fn focus_known(&self) -> bool {
+            self.reports_focus
+        }
+
+        fn focus_node(&self, _: NodeId) -> Result<(), String> {
+            Ok(())
+        }
+
         fn available(&self) -> bool {
             self.available
         }
@@ -1546,6 +1658,16 @@ mod tests {
             self.agent_clip
         }
 
+        fn clipboard_generation(&self) -> Option<u64> {
+            self.generation
+                .as_ref()
+                .map(|g| g.load(std::sync::atomic::Ordering::SeqCst))
+        }
+
+        fn clipboard_text_is(&self, _: &str) -> Option<bool> {
+            self.clip_text_is
+        }
+
         fn input_selections(&self, ids: &[NodeId]) -> HashMap<NodeId, (u32, u32)> {
             self.selection_reads
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1557,6 +1679,17 @@ mod tests {
     }
 
     impl Native for SnapshotNative {
+        fn press_keys(&self, keys: &str) -> Result<(), String> {
+            self.keys.lock().unwrap().push(keys.to_owned());
+            if self.copies
+                && nsh_agent_actions::is_copy_chord(keys)
+                && let Some(generation) = &self.generation
+            {
+                generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }
+
         fn bounds(&self, id: NodeId) -> Option<nsh_core::geometry::Bounds<Points>> {
             let (x, y, width, height) = match id {
                 1 => (0.0, 0.0, 100.0, 100.0),
@@ -1580,6 +1713,12 @@ mod tests {
 
         fn press(&self, at: Point<Points>) {
             self.presses.lock().unwrap().push(at);
+            if self.press_focuses
+                && let Some(input) = self.bounds(3)
+                && input.contains(&at)
+            {
+                *self.focused.lock().unwrap() = Some(3);
+            }
         }
 
         fn long_press(&self, _: Point<Points>, _: std::time::Duration) {}
@@ -1591,6 +1730,13 @@ mod tests {
 
         fn type_text(&self, _: &str) {}
         fn key(&self, _: nsh_testing::agent::Key) {}
+        fn focused(&self) -> Option<NodeId> {
+            if self.reports_focus {
+                *self.focused.lock().unwrap()
+            } else {
+                None
+            }
+        }
         fn input_text(&self, id: NodeId) -> Option<String> {
             (id == 3).then(|| self.input.clone()).flatten()
         }
@@ -1866,6 +2012,7 @@ mod tests {
                     target: Some(target.into()),
                     x: None,
                     y: None,
+                    within: None,
                     expect_fingerprint: None,
                 })
                 .unwrap_err();
@@ -1942,6 +2089,212 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A host whose field `visible` (node 3) takes keys, with a clipboard
+    /// generation that starts at 5: its pressed keys, and the generation.
+    fn generation_host(
+        copies: bool,
+    ) -> (
+        NshAgentHost,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        generation_host_with(copies, |_, _| {})
+    }
+
+    /// [`generation_host`], with node 3 and the platform changed by `edit`
+    /// first.
+    fn generation_host_with(
+        copies: bool,
+        edit: impl FnOnce(&mut SemanticNode, &mut SnapshotNative),
+    ) -> (
+        NshAgentHost,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        let mut nodes = sample_nodes();
+        nodes[2].role = "textbox".into();
+        nodes[2].input = true;
+        nodes[2].enabled = true;
+        let generation = Arc::new(std::sync::atomic::AtomicU64::new(5));
+        let mut native = SnapshotNative::new(true, Some(String::new()), false);
+        native.generation = Some(generation.clone());
+        native.copies = copies;
+        edit(&mut nodes[2], &mut native);
+        let keys = native.keys.clone();
+        let host =
+            snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);
+        (host, keys, generation)
+    }
+
+    #[test]
+    fn a_paste_chord_after_this_runs_copy_pastes() {
+        let (mut host, keys, _) = generation_host(true);
+        host.dispatch(&Op::key("visible", "mod+c")).unwrap();
+        host.dispatch(&Op::key("visible", "mod+v")).unwrap();
+        assert_eq!(*keys.lock().unwrap(), ["mod+c", "mod+v"]);
+    }
+
+    #[test]
+    fn a_paste_chord_without_this_runs_copy_is_refused() {
+        // A clip already on the clipboard (generation 5) is another's.
+        let (mut host, keys, _) = generation_host(true);
+        let reply = format!("{:?}", host.dispatch(&Op::key("visible", "mod+v")));
+        assert!(reply.contains("pastes the system clipboard"), "{reply}");
+        assert!(keys.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_write_after_this_runs_copy_makes_the_clip_anothers() {
+        let (mut host, keys, generation) = generation_host(true);
+        host.dispatch(&Op::key("visible", "mod+c")).unwrap();
+        // A person or another app copies something meanwhile.
+        generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let reply = format!("{:?}", host.dispatch(&Op::key("visible", "ctrl+v")));
+        assert!(reply.contains("pastes the system clipboard"), "{reply}");
+        assert_eq!(*keys.lock().unwrap(), ["mod+c"]);
+    }
+
+    #[test]
+    fn a_copy_that_wrote_nothing_leaves_the_clip_anothers() {
+        // Nothing selected: the copy moves no generation.
+        let (mut host, keys, _) = generation_host(false);
+        host.dispatch(&Op::key("visible", "mod+c")).unwrap();
+        let reply = format!("{:?}", host.dispatch(&Op::key("visible", "mod+v")));
+        assert!(reply.contains("pastes the system clipboard"), "{reply}");
+        assert_eq!(*keys.lock().unwrap(), ["mod+c"]);
+    }
+
+    #[test]
+    fn a_copy_or_cut_chord_on_a_masked_field_is_refused() {
+        for chord in ["mod+c", "ctrl+x", "shift+delete"] {
+            let (mut host, keys, generation) = generation_host_with(true, |node, _| {
+                node.states.push("masked".into());
+            });
+            let reply = format!("{:?}", host.dispatch(&Op::key("visible", chord)));
+            assert!(
+                reply.contains("the field is masked") && reply.contains("would give its text away"),
+                "{chord}: {reply}"
+            );
+            assert!(keys.lock().unwrap().is_empty(), "{chord}");
+            assert_eq!(generation.load(std::sync::atomic::Ordering::SeqCst), 5);
+        }
+        // Other keys still reach a masked field.
+        let (mut host, keys, _) = generation_host_with(true, |node, _| {
+            node.states.push("masked".into());
+        });
+        host.dispatch(&Op::key("visible", "Tab")).unwrap();
+        assert_eq!(*keys.lock().unwrap(), ["Tab"]);
+    }
+
+    #[test]
+    fn a_copy_chord_is_refused_while_a_masked_field_keeps_the_focus() {
+        // The target (node 3) is no masked field, but focusing it leaves the
+        // focus on the masked node 2, where the keys would go.
+        let mut nodes = sample_nodes();
+        nodes[1].input = true;
+        nodes[1].states.push("masked".into());
+        nodes[2].role = "textbox".into();
+        nodes[2].input = true;
+        nodes[2].enabled = true;
+        let mut native = SnapshotNative::new(true, Some(String::new()), false);
+        native.generation = Some(Arc::new(std::sync::atomic::AtomicU64::new(5)));
+        native.press_focuses = false;
+        *native.focused.lock().unwrap() = Some(2);
+        let keys = native.keys.clone();
+        let mut host =
+            snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);
+        for chord in ["mod+c", "ctrl+x"] {
+            let reply = format!("{:?}", host.dispatch(&Op::key("visible", chord)));
+            assert!(reply.contains("the field is masked"), "{chord}: {reply}");
+        }
+        assert!(keys.lock().unwrap().is_empty());
+        // Other keys still go.
+        host.dispatch(&Op::key("visible", "Tab")).unwrap();
+        assert_eq!(*keys.lock().unwrap(), ["Tab"]);
+    }
+
+    #[test]
+    fn the_text_menus_cut_and_copy_are_refused_over_a_masked_field() {
+        for (field, focused) in [("3", None), ("", Some(3))] {
+            let mut nodes = sample_nodes();
+            nodes[2].input = true;
+            nodes[2].states.push("masked".into());
+            let mut native = SnapshotNative::new(true, None, false);
+            // An empty field slot: a menu that does not say its field, so
+            // the focused one counts.
+            native.text_menu = nsh_agent_actions::TextMenu::from_strings(
+                &["selection", field, "cut", "copy", "select-all"].map(String::from),
+            );
+            *native.focused.lock().unwrap() = focused;
+            let pressed = native.menu_presses.clone();
+            let mut host =
+                snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);
+            for word in ["cut", "copy"] {
+                let reply = format!(
+                    "{:?}",
+                    host.dispatch(&Op::click(&format!("system-text-menu-{word}")))
+                );
+                assert!(
+                    reply.contains("the field is masked"),
+                    "{field} {word}: {reply}"
+                );
+            }
+            host.dispatch(&Op::click("system-text-menu-select-all"))
+                .unwrap();
+            assert_eq!(*pressed.lock().unwrap(), ["select-all"], "{field}");
+        }
+    }
+
+    /// A field holding "123456789" with its whole text selected, whose
+    /// platform compares the clip as `clip_text_is` says.
+    fn selected_code_host(
+        selection: (u32, u32),
+        clip_text_is: Option<bool>,
+    ) -> (NshAgentHost, Arc<std::sync::Mutex<Vec<String>>>) {
+        let (host, keys, _) = generation_host_with(true, |node, native| {
+            node.value = Some("123456789".into());
+            native.selection = Some(selection);
+            native.clip_text_is = clip_text_is;
+        });
+        (host, keys)
+    }
+
+    #[test]
+    fn a_copy_is_this_runs_when_the_clip_is_the_selected_text() {
+        for clip_text_is in [Some(true), None] {
+            let (mut host, keys) = selected_code_host((0, 9), clip_text_is);
+            host.dispatch(&Op::key("visible", "mod+c")).unwrap();
+            host.dispatch(&Op::key("visible", "mod+v")).unwrap();
+            assert_eq!(
+                *keys.lock().unwrap(),
+                ["mod+c", "mod+v"],
+                "{clip_text_is:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_copy_whose_clip_is_another_text_stays_anothers() {
+        // The generation moved, but to a text the field did not have
+        // selected: someone else wrote between the chord and the read.
+        let (mut host, keys) = selected_code_host((0, 9), Some(false));
+        host.dispatch(&Op::key("visible", "mod+c")).unwrap();
+        let reply = format!("{:?}", host.dispatch(&Op::key("visible", "mod+v")));
+        assert!(reply.contains("pastes the system clipboard"), "{reply}");
+        assert_eq!(*keys.lock().unwrap(), ["mod+c"]);
+    }
+
+    #[test]
+    fn a_copy_with_nothing_selected_never_makes_the_clip_this_runs() {
+        // A bare caret copies nothing: a generation that moved anyway is
+        // another's write.
+        let (mut host, keys) = selected_code_host((4, 4), Some(true));
+        host.dispatch(&Op::key("visible", "mod+c")).unwrap();
+        let reply = format!("{:?}", host.dispatch(&Op::key("visible", "mod+v")));
+        assert!(reply.contains("pastes the system clipboard"), "{reply}");
+        assert_eq!(*keys.lock().unwrap(), ["mod+c"]);
     }
 
     #[test]
@@ -2216,6 +2569,7 @@ mod tests {
             target: Some("visible".into()),
             x: None,
             y: None,
+            within: None,
             expect_fingerprint: None,
         })
         .unwrap();
@@ -2224,6 +2578,75 @@ mod tests {
             *presses.lock().unwrap(),
             vec![Point::new(Points(10.0), Points(10.0))]
         );
+    }
+
+    /// A host over the sample tree whose `visible` (node 3, 10 by 10 at
+    /// (5, 5)) is pressable: it, and the points pressed.
+    fn pressable_visible_host() -> (NshAgentHost, Arc<std::sync::Mutex<Vec<Point<Points>>>>) {
+        let mut nodes = sample_nodes();
+        let visible = nodes.iter_mut().find(|node| node.id == 3).unwrap();
+        visible.enabled = true;
+        visible.pressable = true;
+        let presses = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut native = SnapshotNative::new(true, None, false);
+        native.presses = presses.clone();
+        let host =
+            snapshot_host_with_native(SnapshotScene(Ok(nodes), 1, Default::default()), native);
+        (host, presses)
+    }
+
+    fn press_within(target: Option<&str>, x: f64, y: f64) -> Op {
+        Op::Press {
+            target: target.map(Into::into),
+            x: None,
+            y: None,
+            within: Some(gpui_agent::protocol::PointOffset { x, y }),
+            expect_fingerprint: None,
+        }
+    }
+
+    #[test]
+    fn a_press_within_its_target_lands_at_that_point_of_it() {
+        let (mut host, presses) = pressable_visible_host();
+        host.dispatch(&press_within(Some("visible"), 2.0, 3.0))
+            .unwrap();
+        assert_eq!(
+            *presses.lock().unwrap(),
+            vec![Point::new(Points(7.0), Points(8.0))]
+        );
+    }
+
+    #[test]
+    fn a_press_within_refuses_a_point_outside_its_target_or_no_target() {
+        let (mut host, presses) = pressable_visible_host();
+        let error = host
+            .dispatch(&press_within(Some("visible"), 10.0, 3.0))
+            .unwrap_err();
+        assert!(error.contains("outside the node"), "{error}");
+        let error = host.dispatch(&press_within(None, 2.0, 3.0)).unwrap_err();
+        assert!(error.contains("needs a target"), "{error}");
+        assert!(presses.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn hello_lists_press_within_and_assert_states_on_every_platform() {
+        for platform in [
+            PlatformKind::Desktop,
+            PlatformKind::Mobile,
+            PlatformKind::Web,
+        ] {
+            let agent = Arc::new(Agent::requiring_native_hit_test(
+                Arc::new(SnapshotScene(Ok(sample_nodes()), 1, Default::default())),
+                Box::new(SnapshotNative::new(true, None, false)),
+            ));
+            let hello = NshAgentHost::new("test", platform, agent).unwrap().hello();
+            for feature in ["press_within", "assert_states"] {
+                assert!(
+                    hello.features.iter().any(|name| name == feature),
+                    "{platform:?}: {feature}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2316,6 +2739,37 @@ mod tests {
         assert_eq!(snapshot.nodes[0].checked, None);
         assert_eq!(snapshot.nodes[0].children[0].checked, Some(false));
         assert_eq!(snapshot.nodes[0].children[1].checked, Some(true));
+    }
+
+    #[test]
+    fn an_occluder_is_named_by_the_view_a_press_there_goes_to() {
+        // A pressable pill (5) whose icon (6) has no test id; a plain
+        // overlay (7) that nothing presses through.
+        let mut nodes = sample_nodes();
+        let mut pill = SemanticNode::default();
+        pill.id = 5;
+        pill.parent = Some(1);
+        pill.test_id = Some("pill".into());
+        pill.pressable = true;
+        let mut icon = SemanticNode::default();
+        icon.id = 6;
+        icon.parent = Some(5);
+        let mut overlay = SemanticNode::default();
+        overlay.id = 7;
+        overlay.parent = Some(1);
+        nodes.extend([pill, icon, overlay]);
+
+        let named = |error: &str| name_occluder(error.to_owned(), &nodes);
+        assert_eq!(named("occluded_by: 6"), "occluded_by: pill (its n6)");
+        assert_eq!(named("occluded_by: 5"), "occluded_by: pill");
+        assert_eq!(named("occluded_by: 7"), "occluded_by: n7");
+        assert_eq!(named("occluded_by: 3"), "occluded_by: visible");
+        // A view the tree does not know, other refusals and the keyboard's
+        // stay as they are.
+        assert_eq!(named("occluded_by: 99"), "occluded_by: 99");
+        assert_eq!(named("`x` is offscreen"), "`x` is offscreen");
+        let keyboard = "occluded_by: software keyboard (a press lands on a key)";
+        assert_eq!(named(keyboard), keyboard);
     }
 
     #[test]

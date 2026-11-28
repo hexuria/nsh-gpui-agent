@@ -142,6 +142,7 @@ pub(super) fn run() {
                 target: Some(id),
                 x: None,
                 y: None,
+                within: None,
                 expect_fingerprint: None,
             })
             .expect("native button press");
