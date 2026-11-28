@@ -792,6 +792,11 @@ pub struct Agent {
     /// The clipboard generation a copy or cut chord this agent pressed
     /// wrote ([`StrictNative::clipboard_generation`]).
     agent_clip: std::sync::Mutex<Option<u64>>,
+    /// Gestures that scrolled an occluded target clear since the host last took the count ([`Agent::take_scrolls`]):
+    /// any verb that presses or reaches a node can scroll, not only a press. One count per agent: right while a single
+    /// host serves the agent one request at a time (its dispatch takes `&mut self`); make it request-local if a second
+    /// host ever serves the same agent in parallel.
+    scrolls: std::sync::atomic::AtomicUsize,
 }
 
 /// How long the software keyboard's frame must stay the same before it
@@ -881,6 +886,7 @@ impl Agent {
             require_hit_test: false,
             keyboard: std::sync::Mutex::default(),
             agent_clip: std::sync::Mutex::default(),
+            scrolls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -895,6 +901,7 @@ impl Agent {
             require_hit_test: true,
             keyboard: std::sync::Mutex::default(),
             agent_clip: std::sync::Mutex::default(),
+            scrolls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1100,6 +1107,13 @@ impl Agent {
     /// Clicks semantic node `id`, after native actionability is established.
     pub fn press_node(&self, id: NodeId) -> Result<(), String> {
         self.press_node_reporting_scrolls(id).map(|_| ())
+    }
+
+    /// How many gestures scrolled an occluded target clear since the last call, and zero again (#28): a host takes it
+    /// before and after each request and reports it with whatever verb ran, so a `type`, `key` or `set_value` that
+    /// scrolled to reach its field says so as a click does.
+    pub fn take_scrolls(&self) -> usize {
+        self.scrolls.swap(0, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// [`Agent::press_node`], answering how many scroll gestures clearing an
@@ -2879,6 +2893,8 @@ impl Agent {
                 }
             }
             self.native.scroll(middle, point(Points(0.0), Points(step)));
+            self.scrolls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.stopped(id)?;
             return Ok(true);
         }
