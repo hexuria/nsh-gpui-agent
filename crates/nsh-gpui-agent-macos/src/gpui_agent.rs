@@ -631,7 +631,8 @@ fn hello() -> HelloInfo {
         auth: Default::default(),
         bundle_id: None,
         executable: None,
-        features: vec![],
+        // `assert` matches `state` / `states` ([`assert_node`]).
+        features: vec![gpui_agent::protocol::ASSERT_STATES_FEATURE.into()],
         framework: Some("nsh".into()),
         device: None,
     };
@@ -2366,6 +2367,15 @@ fn assert_node(spec: &AssertSpec, node: &UiNode) -> Result<(), String> {
     {
         return Err(format!("assert failed: '{}' visible mismatch", spec.target));
     }
+    // Each state asked for must be one of the node's, exactly.
+    for want in spec.state.iter().chain(&spec.states) {
+        if !node.states.iter().any(|state| state == want) {
+            return Err(format!(
+                "assert failed: '{}' has no state {want:?} (it has: {:?})",
+                spec.target, node.states
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -2657,6 +2667,42 @@ mod tests {
             let reply = serde_json::to_string(&reply).unwrap();
             assert!(!reply.contains(secret), "{reply}");
         }
+    }
+
+    #[test]
+    fn assert_matches_every_state_asked_for_exactly() {
+        let mut node = UiNode::new("code", "textfield", "Code");
+        node.states = vec!["selection: 0-9".into(), "focused".into()];
+        let spec = |state: Option<&str>, states: &[&str]| AssertSpec {
+            target: "code".into(),
+            state: state.map(Into::into),
+            states: states.iter().map(|s| (*s).to_owned()).collect(),
+            ..Default::default()
+        };
+        assert!(assert_node(&spec(Some("selection: 0-9"), &[]), &node).is_ok());
+        assert!(assert_node(&spec(None, &["focused", "selection: 0-9"]), &node).is_ok());
+        assert!(assert_node(&spec(Some("focused"), &["selection: 0-9"]), &node).is_ok());
+        for (state, states) in [
+            (Some("selection: 0-1"), &[][..]),
+            (None, &["focused", "masked"][..]),
+            (Some("selection"), &[][..]),
+        ] {
+            let err = assert_node(&spec(state, states), &node).unwrap_err();
+            assert!(
+                err.starts_with("assert failed: 'code' has no state"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn hello_lists_assert_states() {
+        assert!(
+            hello()
+                .features
+                .iter()
+                .any(|name| name == gpui_agent::protocol::ASSERT_STATES_FEATURE)
+        );
     }
 
     #[test]

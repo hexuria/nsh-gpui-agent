@@ -3695,3 +3695,320 @@ fn paste_chords_are_known_on_every_platform() {
         assert!(!is_paste_chord(keys), "{keys}");
     }
 }
+
+#[test]
+fn copy_chords_are_known_on_every_platform() {
+    for keys in [
+        "mod+c",
+        "Cmd+C",
+        "⌘+x",
+        "ctrl+x",
+        "ctl+c",
+        "ctrl+insert",
+        "shift+delete",
+        "shift+del",
+        "copy",
+        "XF86Cut",
+        "KEYCODE_COPY",
+    ] {
+        assert!(is_copy_chord(keys), "{keys}");
+    }
+    for keys in [
+        "c", "x", "shift+c", "alt+x", "mod+v", "insert", "delete", "Tab", "",
+    ] {
+        assert!(!is_copy_chord(keys), "{keys}");
+    }
+}
+
+#[test]
+fn press_owner_stops_at_a_modal_root() {
+    // A pressable host (2) whose modal (3) holds a plain label (4) and a
+    // pressable row (5) with a plain child (7).
+    let mut modal = semantic_node(3, Some(2), false, SemanticTarget::View);
+    modal.modal = true;
+    let nodes = vec![
+        semantic_node(1, None, false, SemanticTarget::View),
+        semantic_node(2, Some(1), true, SemanticTarget::View),
+        modal,
+        semantic_node(4, Some(3), false, SemanticTarget::View),
+        semantic_node(5, Some(3), true, SemanticTarget::View),
+        semantic_node(7, Some(5), false, SemanticTarget::View),
+    ];
+    let node = |id: NodeId| nodes.iter().find(|node| node.id == id).unwrap();
+    // The label is in the modal's layer: the host outside it takes nothing.
+    assert_eq!(press_owner(&nodes, node(4)), None);
+    assert_eq!(press_owner(&nodes, node(3)), None);
+    // A pressable view inside the modal still owns its children's presses.
+    assert_eq!(press_owner(&nodes, node(7)), Some(5));
+    assert_eq!(press_owner(&nodes, node(5)), Some(5));
+}
+
+/// An agent over `nodes` whose native frames are `bounds` in a 100 by 100
+/// window, and whose hit test answers `hit`: it and its press count.
+fn modal_agent(
+    nodes: Vec<SemanticNode>,
+    bounds: &[(NodeId, Bounds<Points>)],
+    hit: NodeId,
+) -> (Agent, Arc<std::sync::atomic::AtomicUsize>) {
+    let presses = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let agent = Agent::requiring_native_hit_test(
+        target_scene(nodes),
+        Box::new(GateNative {
+            windows: None,
+            bounds: bounds.iter().copied().collect(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(hit)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: presses.clone(),
+            pressed_at: Arc::new(Mutex::new(Vec::new())),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: Size::new(px(100.0), px(100.0)),
+        }),
+    );
+    (agent, presses)
+}
+
+fn rect(x: f32, y: f32, width: f32, height: f32) -> Bounds<Points> {
+    Bounds::new(
+        point(px(x), px(y)),
+        Size::new(Points(width), Points(height)),
+    )
+}
+
+#[test]
+fn a_modal_partly_off_screen_presses_its_part_on_screen_only() {
+    // The modal (3) runs from y 50 to 150 in a 100-point window: row 4 is
+    // on screen, row 6 below the window's edge.
+    let mut modal = semantic_node(3, Some(2), false, SemanticTarget::View);
+    modal.modal = true;
+    let nodes = vec![
+        semantic_node(1, None, false, SemanticTarget::View),
+        semantic_node(2, Some(1), false, SemanticTarget::View),
+        modal,
+        semantic_node(4, Some(3), true, SemanticTarget::View),
+        semantic_node(6, Some(3), true, SemanticTarget::View),
+    ];
+    let bounds = [
+        (1, rect(0.0, 0.0, 100.0, 100.0)),
+        (2, rect(0.0, 0.0, 100.0, 100.0)),
+        (3, rect(0.0, 50.0, 100.0, 100.0)),
+        (4, rect(10.0, 60.0, 20.0, 20.0)),
+        (6, rect(10.0, 120.0, 20.0, 10.0)),
+    ];
+    let (agent, presses) = modal_agent(nodes.clone(), &bounds, 4);
+    agent.press_node(4).unwrap();
+    assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+    let (agent, presses) = modal_agent(nodes, &bounds, 6);
+    let error = agent.press_node(6).unwrap_err();
+    assert!(error.contains("offscreen"), "{error}");
+    assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn a_sheet_under_a_dialog_is_still_occluded() {
+    // A sheet (2) and a dialog (5) over it, both modal roots: a press on
+    // the sheet's row (4) where the dialog's button (6) is on top is
+    // refused, though each modal ignores its logical host's clip.
+    let mut sheet = semantic_node(2, Some(1), false, SemanticTarget::View);
+    sheet.modal = true;
+    let mut dialog = semantic_node(5, Some(1), false, SemanticTarget::View);
+    dialog.modal = true;
+    let nodes = vec![
+        semantic_node(1, None, false, SemanticTarget::View),
+        sheet,
+        semantic_node(4, Some(2), true, SemanticTarget::View),
+        dialog,
+        semantic_node(6, Some(5), true, SemanticTarget::View),
+    ];
+    let bounds = [
+        (1, rect(0.0, 0.0, 100.0, 100.0)),
+        (2, rect(0.0, 50.0, 100.0, 50.0)),
+        (4, rect(10.0, 60.0, 80.0, 20.0)),
+        (5, rect(10.0, 30.0, 80.0, 60.0)),
+        (6, rect(20.0, 55.0, 60.0, 30.0)),
+    ];
+    let (agent, presses) = modal_agent(nodes, &bounds, 6);
+    let error = agent.press_node(4).unwrap_err();
+    assert!(error.contains("occluded_by: 6"), "{error}");
+    assert_eq!(presses.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn a_hold_within_a_node_in_a_modal_ignores_its_hosts_clip() {
+    use nsh_core::{EventMask, MountItem, ViewKind, ViewProps, ViewStyle};
+
+    // A host (2) laid out with no height that clips, a modal (3) in it
+    // painted over the window, and a cell row (4) in the modal that takes
+    // a long press: a hold at a point of the row is not offscreen.
+    let model = Arc::new(Model::default());
+    let mut events = EventMask::default();
+    events.set(EventKind::LongPress, true);
+    model.apply(&MountBatch {
+        items: vec![
+            MountItem::Create {
+                id: 2,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 2,
+                frame: rect(0.0, 90.0, 100.0, 0.0),
+            },
+            MountItem::Insert {
+                parent: 1,
+                child: 2,
+                before: None,
+            },
+            MountItem::ViewStyle {
+                id: 2,
+                style: Box::new(ViewStyle {
+                    overflow_hidden: true,
+                    ..Default::default()
+                }),
+            },
+            MountItem::Create {
+                id: 3,
+                kind: ViewKind::Modal,
+            },
+            MountItem::Frame {
+                id: 3,
+                frame: rect(0.0, 0.0, 100.0, 100.0),
+            },
+            MountItem::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            MountItem::Create {
+                id: 4,
+                kind: ViewKind::View,
+            },
+            MountItem::Frame {
+                id: 4,
+                frame: rect(10.0, 40.0, 60.0, 20.0),
+            },
+            MountItem::Insert {
+                parent: 3,
+                child: 4,
+                before: None,
+            },
+            MountItem::Events { id: 4, events },
+            MountItem::ViewProps {
+                id: 4,
+                props: Box::new(ViewProps {
+                    test_id: Some("cells".into()),
+                    ..ViewProps::default()
+                }),
+            },
+        ],
+    });
+    let long_presses = Arc::new(Mutex::new(Vec::new()));
+    let agent = gate_long_press_agent_with(
+        model,
+        Ok(Some(4)),
+        &[
+            (2, rect(0.0, 90.0, 100.0, 0.0)),
+            (3, rect(0.0, 0.0, 100.0, 100.0)),
+            (4, rect(10.0, 40.0, 60.0, 20.0)),
+        ],
+        &[],
+        long_presses.clone(),
+    );
+
+    agent
+        .long_press_node_within(4, point(px(50.0), px(10.0)), None)
+        .unwrap();
+
+    assert_eq!(
+        *long_presses.lock().unwrap(),
+        vec![(point(px(60.0), px(50.0)), Duration::from_millis(600))]
+    );
+}
+
+/// An agent over a pressable node 2 (60 by 40 at `origin`) in a 100 by 100
+/// window, whose hit test answers `hit`: it, and the points pressed.
+fn within_press_agent(
+    origin: Point<Points>,
+    hit: NodeId,
+) -> (Agent, Arc<Mutex<Vec<Point<Points>>>>) {
+    let pressed_at = Arc::new(Mutex::new(Vec::new()));
+    let nodes = vec![
+        semantic_node(1, None, false, SemanticTarget::View),
+        semantic_node(2, Some(1), true, SemanticTarget::View),
+        semantic_node(3, Some(1), true, SemanticTarget::View),
+    ];
+    let bounds = [
+        (
+            1,
+            Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(100.0))),
+        ),
+        (2, Bounds::new(origin, size(px(60.0), px(40.0)))),
+        (3, Bounds::new(origin, size(px(60.0), px(40.0)))),
+    ];
+    let agent = Agent::requiring_native_hit_test(
+        target_scene(nodes),
+        Box::new(GateNative {
+            windows: None,
+            bounds: bounds.into(),
+            text_bounds: Default::default(),
+            hit: Ok(Some(hit)),
+            hits: Arc::new(Mutex::new(Vec::new())),
+            presses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pressed_at: pressed_at.clone(),
+            long_presses: Arc::new(Mutex::new(Vec::new())),
+            typed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            viewport: Size::new(px(100.0), px(100.0)),
+        }),
+    );
+    (agent, pressed_at)
+}
+
+#[test]
+fn a_press_within_a_node_lands_at_that_point_of_it() {
+    let (agent, pressed_at) = within_press_agent(point(px(20.0), px(10.0)), 2);
+    agent
+        .press_node_within(2, point(px(50.0), px(30.0)))
+        .unwrap();
+    assert_eq!(*pressed_at.lock().unwrap(), vec![point(px(70.0), px(40.0))]);
+}
+
+#[test]
+fn a_press_within_a_node_refuses_a_point_outside_it() {
+    let (agent, pressed_at) = within_press_agent(point(px(20.0), px(10.0)), 2);
+    for within in [
+        point(px(60.0), px(10.0)),
+        point(px(10.0), px(40.0)),
+        point(px(-1.0), px(10.0)),
+        point(px(f32::NAN), px(10.0)),
+    ] {
+        let error = agent.press_node_within(2, within).unwrap_err();
+        assert!(error.contains("outside the node"), "{within:?}: {error}");
+    }
+    assert!(pressed_at.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_press_within_a_node_is_hit_tested_where_it_lands() {
+    // A sibling (3) on top where the point lands occludes it.
+    let (agent, pressed_at) = within_press_agent(point(px(20.0), px(10.0)), 3);
+    let error = agent
+        .press_node_within(2, point(px(50.0), px(30.0)))
+        .unwrap_err();
+    assert!(error.contains("occluded_by: 3"), "{error}");
+    assert!(pressed_at.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_press_within_a_node_refuses_a_point_scrolled_off_the_window() {
+    // The node runs from y 80 to 120 in a 100-point window.
+    let (agent, pressed_at) = within_press_agent(point(px(20.0), px(80.0)), 2);
+    let error = agent
+        .press_node_within(2, point(px(10.0), px(30.0)))
+        .unwrap_err();
+    assert!(error.contains("outside its visible area"), "{error}");
+    agent
+        .press_node_within(2, point(px(10.0), px(10.0)))
+        .unwrap();
+    assert_eq!(*pressed_at.lock().unwrap(), vec![point(px(30.0), px(90.0))]);
+}
